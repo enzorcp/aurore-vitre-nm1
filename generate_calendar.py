@@ -1,63 +1,233 @@
 import requests
-from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
-import re
+from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
-URL = "https://competitions.ffbb.com/ligues/bre/comites/0035/clubs/bre0035110/equipes/200000005138564"
+BASE_URL = "https://api.ffbb.com"
+CLUB_CODE = "BRE0035110"
+TEAM_KEYWORDS = ["NM1", "NATIONALE MASCULINE 1"]
+SEASON_KEYWORDS = ["2026-2027", "2026 / 2027", "2026–2027"]
 
-def clean(text):
-    return re.sub(r"\s+", " ", text).strip()
+TZ = ZoneInfo("Europe/Paris")
 
-response = requests.get(URL, timeout=30)
-response.raise_for_status()
 
-soup = BeautifulSoup(response.text, "html.parser")
+def api_get(path, params=None, token=None):
+    headers = {}
 
-# Recherche des informations de matchs présentes sur la page FFBB
-text = clean(soup.get_text(" ", strip=True))
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
 
-# Vérification basique : on veut bien récupérer la page de Vitré
-if "Vitré" not in text and "Aurore" not in text:
-    raise RuntimeError("La page FFBB de l'équipe n'a pas été reconnue.")
+    response = requests.get(
+        BASE_URL + path,
+        params=params,
+        headers=headers,
+        timeout=30,
+    )
 
-print("Page FFBB récupérée correctement.")
+    response.raise_for_status()
+    return response.json()["data"]
 
-# ------------------------------------------------------------------
-# IMPORTANT :
-# La structure de la page FFBB peut évoluer.
-# Ce script sert de base et sera ajusté si nécessaire après le premier test.
-# ------------------------------------------------------------------
 
-# Pour éviter de générer un calendrier vide si la FFBB modifie sa page,
-# on conserve temporairement les rencontres connues.
-matches = [
-    ("2026-09-19", "Angers", False),
-    ("2026-09-30", "Lorient", True),
-    ("2026-10-03", "Fougères", False),
-    ("2026-10-07", "Pôle France Basket", False),
-    ("2026-10-17", "Tarbes-Lourdes", False),
-    ("2026-10-21", "Tours", True),
-    ("2026-10-24", "Métropolitans", False),
-    ("2026-10-28", "Rennes", True),
-    ("2026-10-31", "Toulouse", True),
-    ("2026-11-04", "Val de Seine", False),
-    ("2026-11-07", "Chartres", True),
-    ("2026-11-14", "Les Sables", False),
-    ("2026-11-21", "Poissy", True),
-    ("2026-12-05", "Angers", True),
-    ("2026-12-09", "Pôle France Basket", True),
-    ("2026-12-16", "Lorient", False),
-    ("2026-12-19", "Fougères", True),
-    ("2027-01-09", "Rennes", False),
-    ("2027-01-16", "Tarbes-Lourdes", True),
-    ("2027-01-20", "Tours", False),
-    ("2027-01-23", "Métropolitans", True),
-    ("2027-01-30", "Toulouse", False),
-    ("2027-02-03", "Val de Seine", True),
-    ("2027-02-06", "Chartres", False),
-    ("2027-02-13", "Les Sables", True),
-    ("2027-02-20", "Poissy", False),
-]
+def get_token():
+    response = requests.get(
+        f"{BASE_URL}/items/configuration",
+        timeout=30,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()["data"]
+
+    if not data.get("key_dh"):
+        raise RuntimeError("Impossible de récupérer le token FFBB.")
+
+    return data["key_dh"]
+
+
+def get_club(token):
+    params = [
+        ("filter[code][_eq]", CLUB_CODE),
+        ("fields[]", "id"),
+        ("fields[]", "nom"),
+        ("fields[]", "code"),
+    ]
+
+    clubs = api_get(
+        "/items/ffbbserver_organismes",
+        params=params,
+        token=token,
+    )
+
+    if not clubs:
+        raise RuntimeError(
+            f"Club introuvable avec le code {CLUB_CODE}"
+        )
+
+    return clubs[0]
+
+
+def get_engagements(token, club_id):
+    params = [
+        ("filter[idOrganisme][_eq]", club_id),
+        ("limit", "100"),
+        ("fields[]", "id"),
+        ("fields[]", "nom"),
+        ("fields[]", "idPoule"),
+        ("fields[]", "idCompetition"),
+        ("fields[]", "idCompetition.nom"),
+        ("fields[]", "idCompetition.code"),
+        ("fields[]", "idCompetition.categorie.code"),
+        ("fields[]", "idCompetition.saison.id"),
+        ("fields[]", "idCompetition.saison.nom"),
+    ]
+
+    return api_get(
+        "/items/ffbbserver_engagements",
+        params=params,
+        token=token,
+    )
+
+
+def find_nm1_engagement(engagements):
+    candidates = []
+
+    for engagement in engagements:
+
+        competition = engagement.get("idCompetition") or {}
+
+        competition_name = str(
+            competition.get("nom", "")
+        ).upper()
+
+        competition_code = str(
+            competition.get("code", "")
+        ).upper()
+
+        category = competition.get("categorie") or {}
+
+        category_code = str(
+            category.get("code", "")
+        ).upper()
+
+        season = competition.get("saison") or {}
+
+        season_name = str(
+            season.get("nom", "")
+        ).upper()
+
+        is_nm1 = (
+            "NM1" in competition_name
+            or "NATIONALE MASCULINE 1" in competition_name
+            or competition_code == "NM1"
+            or category_code == "NM1"
+        )
+
+        if not is_nm1:
+            continue
+
+        is_current_season = (
+            "2026" in season_name
+            and "2027" in season_name
+        )
+
+        if is_current_season:
+            candidates.insert(0, engagement)
+        else:
+            candidates.append(engagement)
+
+    if not candidates:
+        raise RuntimeError(
+            "Impossible de trouver l'engagement NM1 2026-2027."
+        )
+
+    return candidates[0]
+
+
+def get_poule(token, poule_id):
+    fields = [
+        "id",
+        "nom",
+        "rencontres.id",
+        "rencontres.numero",
+        "rencontres.numeroJournee",
+        "rencontres.nomEquipe1",
+        "rencontres.nomEquipe2",
+        "rencontres.date_rencontre",
+        "rencontres.resultatEquipe1",
+        "rencontres.resultatEquipe2",
+        "rencontres.salle.libelle",
+        "rencontres.salle.commune.libelle",
+        "rencontres.idEngagementEquipe1.id",
+        "rencontres.idEngagementEquipe1.nom",
+        "rencontres.idEngagementEquipe1.idOrganisme.id",
+        "rencontres.idEngagementEquipe1.idOrganisme.code",
+        "rencontres.idEngagementEquipe2.id",
+        "rencontres.idEngagementEquipe2.nom",
+        "rencontres.idEngagementEquipe2.idOrganisme.id",
+        "rencontres.idEngagementEquipe2.idOrganisme.code",
+    ]
+
+    params = [
+        ("fields[]", field)
+        for field in fields
+    ]
+
+    params.append(
+        ("deep[rencontres][_limit]", "1000")
+    )
+
+    params.append(
+        ("deep[rencontres][_sort]", "date_rencontre")
+    )
+
+    return api_get(
+        f"/items/ffbbserver_poules/{poule_id}",
+        params=params,
+        token=token,
+    )
+
+
+def parse_date(value):
+    if not value:
+        return None
+
+    value = str(value)
+
+    # ISO FFBB
+    try:
+        dt = datetime.fromisoformat(
+            value.replace("Z", "+00:00")
+        )
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=TZ)
+
+        return dt.astimezone(TZ)
+
+    except ValueError:
+        pass
+
+    # Quelques formats de secours
+    formats = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y",
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(
+                value,
+                fmt,
+            ).replace(tzinfo=TZ)
+
+        except ValueError:
+            continue
+
+    return None
+
 
 def escape(value):
     return (
@@ -68,50 +238,244 @@ def escape(value):
         .replace("\n", "\\n")
     )
 
-lines = [
-    "BEGIN:VCALENDAR",
-    "VERSION:2.0",
-    "PRODID:-//Aurore Vitré Basket//NM1//FR",
-    "CALSCALE:GREGORIAN",
-    "METHOD:PUBLISH",
-    "X-WR-CALNAME:Aurore Vitré Basket - NM1",
-    "X-WR-TIMEZONE:Europe/Paris",
-]
 
-now = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+def make_ics(matches):
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Aurore Vitré Basket//NM1//FR",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        "X-WR-CALNAME:Aurore Vitré Basket - NM1",
+        "X-WR-TIMEZONE:Europe/Paris",
+    ]
 
-for i, (date, opponent, home) in enumerate(matches, 1):
+    now = datetime.now(
+        tz=TZ
+    ).strftime("%Y%m%dT%H%M%S")
 
-    # Horaire provisoire par défaut.
-    # Il pourra être remplacé par l'horaire FFBB lorsqu'il sera extrait.
-    dt = datetime.strptime(date + " 20:00", "%Y-%m-%d %H:%M")
-    end = dt + timedelta(hours=2)
+    for match in matches:
 
-    start_str = dt.strftime("%Y%m%dT%H%M%S")
-    end_str = end.strftime("%Y%m%dT%H%M%S")
+        date = parse_date(
+            match.get("date_rencontre")
+        )
 
-    if home:
-        summary = f"Aurore Vitré NM1 - {opponent}"
-        description = f"Aurore Vitré reçoit {opponent}"
+        if not date:
+            print(
+                "Match ignoré : date inconnue",
+                match
+            )
+            continue
+
+        team1 = str(
+            match.get("nomEquipe1", "")
+        ).strip()
+
+        team2 = str(
+            match.get("nomEquipe2", "")
+        ).strip()
+
+        if not team1 or not team2:
+            continue
+
+        is_vitre_home = (
+            CLUB_CODE in str(
+                (match.get("idEngagementEquipe1") or {})
+                .get("idOrganisme", {})
+                .get("code", "")
+            )
+        )
+
+        if is_vitre_home:
+            opponent = team2
+            summary = f"Aurore Vitré NM1 - {opponent}"
+        else:
+            opponent = team1
+            summary = f"{opponent} - Aurore Vitré NM1"
+
+        location = ""
+
+        salle = match.get("salle") or {}
+
+        if salle.get("libelle"):
+            location = str(
+                salle["libelle"]
+            )
+
+        commune = (
+            salle.get("commune") or {}
+        )
+
+        if commune.get("libelle"):
+            if location:
+                location += ", "
+
+            location += str(
+                commune["libelle"]
+            )
+
+        end = date + timedelta(hours=2)
+
+        start_str = date.strftime(
+            "%Y%m%dT%H%M%S"
+        )
+
+        end_str = end.strftime(
+            "%Y%m%dT%H%M%S"
+        )
+
+        journee = (
+            match.get("numeroJournee")
+            or match.get("numero")
+            or ""
+        )
+
+        description = (
+            f"NM1 2026-2027"
+            f"\\nJournée {journee}"
+            f"\\n{team1} - {team2}"
+        )
+
+        uid = (
+            f"aurore-vitre-nm1-"
+            f"{match.get('id', start_str)}"
+            f"@aurore-vitre"
+        )
+
+        lines.extend([
+            "BEGIN:VEVENT",
+            f"UID:{uid}",
+            f"DTSTAMP:{now}",
+            f"DTSTART;TZID=Europe/Paris:{start_str}",
+            f"DTEND;TZID=Europe/Paris:{end_str}",
+            f"SUMMARY:{escape(summary)}",
+            f"DESCRIPTION:{description}",
+            f"LOCATION:{escape(location)}",
+            "END:VEVENT",
+        ])
+
+    lines.append("END:VCALENDAR")
+
+    return "\r\n".join(lines) + "\r\n"
+
+
+def main():
+
+    print("Récupération du token FFBB...")
+    token = get_token()
+
+    print("Recherche du club VITRE AURORE...")
+    club = get_club(token)
+
+    print(
+        f"Club trouvé : {club['nom']} "
+        f"({club['code']})"
+    )
+
+    print("Recherche de l'engagement NM1...")
+    engagements = get_engagements(
+        token,
+        club["id"]
+    )
+
+    print(
+        f"{len(engagements)} engagement(s) trouvé(s)"
+    )
+
+    engagement = find_nm1_engagement(
+        engagements
+    )
+
+    print(
+        "Engagement sélectionné :",
+        engagement.get("nom")
+    )
+
+    poule = engagement.get("idPoule")
+
+    if isinstance(poule, dict):
+        poule_id = poule.get("id")
     else:
-        summary = f"{opponent} - Aurore Vitré NM1"
-        description = f"{opponent} reçoit l'Aurore Vitré"
+        poule_id = poule
 
-    lines.extend([
-        "BEGIN:VEVENT",
-        f"UID:aurore-vitre-nm1-{date}-{i}@aurore-vitre",
-        f"DTSTAMP:{now}",
-        f"DTSTART;TZID=Europe/Paris:{start_str}",
-        f"DTEND;TZID=Europe/Paris:{end_str}",
-        f"SUMMARY:{escape(summary)}",
-        f"DESCRIPTION:{escape(description)}",
-        f"LOCATION:{escape(opponent if not home else 'Vitré')}",
-        "END:VEVENT",
-    ])
+    if not poule_id:
+        raise RuntimeError(
+            "Impossible de trouver la poule NM1."
+        )
 
-lines.append("END:VCALENDAR")
+    print(
+        f"Récupération de la poule {poule_id}..."
+    )
 
-with open("calendrier.ics", "w", encoding="utf-8") as file:
-    file.write("\r\n".join(lines) + "\r\n")
+    poule_data = get_poule(
+        token,
+        poule_id
+    )
 
-print("Calendrier généré :", len(matches), "matchs")
+    rencontres = (
+        poule_data.get("rencontres")
+        or []
+    )
+
+    # On garde uniquement les matchs de Vitré.
+    matches = []
+
+    for match in rencontres:
+
+        e1 = match.get(
+            "idEngagementEquipe1"
+        ) or {}
+
+        e2 = match.get(
+            "idEngagementEquipe2"
+        ) or {}
+
+        code1 = (
+            (e1.get("idOrganisme") or {})
+            .get("code", "")
+        )
+
+        code2 = (
+            (e2.get("idOrganisme") or {})
+            .get("code", "")
+        )
+
+        if code1 == CLUB_CODE or code2 == CLUB_CODE:
+            matches.append(match)
+
+    matches.sort(
+        key=lambda m: (
+            parse_date(
+                m.get("date_rencontre")
+            )
+            or datetime.max.replace(
+                tzinfo=TZ
+            )
+        )
+    )
+
+    if not matches:
+        raise RuntimeError(
+            "Aucun match de l'Aurore Vitré trouvé."
+        )
+
+    print(
+        f"{len(matches)} match(s) NM1 trouvé(s)."
+    )
+
+    ics = make_ics(matches)
+
+    with open(
+        "calendrier.ics",
+        "w",
+        encoding="utf-8"
+    ) as file:
+        file.write(ics)
+
+    print(
+        "calendrier.ics généré avec succès."
+    )
+
+
+if __name__ == "__main__":
+    main()
