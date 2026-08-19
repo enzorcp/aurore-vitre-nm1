@@ -5,7 +5,6 @@ on:
     - cron: "0 6 * * *"
   workflow_dispatch:
 
-
 permissions:
   contents: write
 
@@ -17,7 +16,7 @@ jobs:
       - name: Récupérer le dépôt
         uses: actions/checkout@v4
 
-            - name: Installer Python
+      - name: Installer Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.x"
