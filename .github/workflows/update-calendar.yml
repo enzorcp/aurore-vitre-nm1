@@ -16,10 +16,14 @@ jobs:
       - name: Récupérer le dépôt
         uses: actions/checkout@v4
 
-      - name: Installer Python
+            - name: Installer Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.x"
+
+      - name: Installer les dépendances
+        run: |
+          pip install requests beautifulsoup4
 
       - name: Générer le calendrier
         run: |
