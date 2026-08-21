@@ -19,15 +19,27 @@ jobs:
       - name: Installer Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.13"
 
       - name: Installer les dépendances
         run: |
-          pip install requests beautifulsoup4
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 playwright
+
+      - name: Installer Chromium
+        run: |
+          python -m playwright install --with-deps chromium
 
       - name: Générer le calendrier
         run: |
           python generate_calendar.py
+
+      - name: Vérifier le calendrier
+        run: |
+          test -f calendrier.ics
+          echo "Calendrier généré :"
+          wc -l calendrier.ics
+          head -n 10 calendrier.ics
 
       - name: Enregistrer les modifications
         run: |
