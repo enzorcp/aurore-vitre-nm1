@@ -3,21 +3,25 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import re
 
-
 BASE_URL = "https://competitions.ffbb.com/competitions/nm1"
 PHASE = "200000002897178"
 POULE = "200000003054369"
 
 TEAM = "AURORE VITRE BASKET BRETAGNE"
-
 TZ = ZoneInfo("Europe/Paris")
 
 
-def clean(text):
-    return re.sub(r"[ \t]+", " ", text).strip()
+def escape(value):
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\n", "\\n")
+    )
 
 
-def parse_date(text):
+def parse_datetime(text):
     mois = {
         "janvier": 1,
         "février": 2,
@@ -41,155 +45,167 @@ def parse_date(text):
         r"(\d{1,2}):(\d{2})"
     )
 
-    match = re.search(
-        pattern,
-        text,
-        re.IGNORECASE
-    )
+    m = re.search(pattern, text, re.IGNORECASE)
 
-    if not match:
+    if not m:
         return None
 
-    jour = int(match.group(1))
-    mois_num = mois[match.group(2).lower()]
-    annee = int(match.group(3))
-    heure = int(match.group(4))
-    minute = int(match.group(5))
-
     return datetime(
-        annee,
-        mois_num,
-        jour,
-        heure,
-        minute,
-        tzinfo=TZ
+        int(m.group(3)),
+        mois[m.group(2).lower()],
+        int(m.group(1)),
+        int(m.group(4)),
+        int(m.group(5)),
+        tzinfo=TZ,
     )
 
 
-def extract_matches(page_text, journee):
+def get_team_links(page):
     """
-    Analyse le texte rendu par la page FFBB.
-
-    Une journée contient plusieurs blocs :
-    DATE/HEURE
-    EQUIPE 1
-    EQUIPE 2
-    Résultat
-
-    On cherche le bloc contenant Vitré.
+    Récupère directement les liens vers les équipes
+    dans le HTML rendu par FFBB.
     """
 
-    lines = [
-        clean(line)
-        for line in page_text.splitlines()
-        if clean(line)
-    ]
+    links = page.locator("a").all()
 
-    # On repère les lignes contenant une date/heure.
-    date_indexes = []
+    result = []
 
-    for index, line in enumerate(lines):
-        if parse_date(line):
-            date_indexes.append(index)
+    for link in links:
 
-    matches = []
+        try:
+            text = link.inner_text().strip()
+            href = link.get_attribute("href")
 
-    for i, start in enumerate(date_indexes):
+            if not href:
+                continue
 
-        end = (
-            date_indexes[i + 1]
-            if i + 1 < len(date_indexes)
-            else len(lines)
-        )
+            if TEAM in text.upper():
 
-        block = lines[start:end]
+                result.append({
+                    "text": text,
+                    "href": href
+                })
 
-        date = parse_date(block[0])
+        except Exception:
+            pass
 
-        if not date:
-            continue
+    return result
 
-        # Recherche de Vitré dans le bloc.
-        vitre_index = None
 
-        for j, line in enumerate(block):
-            if TEAM in line.upper():
-                vitre_index = j
+def extract_match_from_page(page, journee):
+
+    # On cherche tous les éléments contenant exactement
+    # le nom officiel de Vitré.
+    locator = page.get_by_text(
+        TEAM,
+        exact=True
+    )
+
+    count = locator.count()
+
+    print(
+        f"Éléments '{TEAM}' trouvés : {count}"
+    )
+
+    if count == 0:
+        return None
+
+    # Le premier élément correspond normalement
+    # au match de la journée.
+    element = locator.first
+
+    # On remonte dans les parents pour retrouver
+    # le conteneur du match.
+    current = element
+
+    for _ in range(8):
+
+        try:
+            current = current.locator("..")
+
+            text = current.inner_text()
+
+            if (
+                TEAM in text.upper()
+                and (
+                    "Résultat" in text
+                    or "Resultat" in text
+                )
+            ):
                 break
 
-        if vitre_index is None:
-            continue
+        except Exception:
+            break
 
-        # On cherche l'adversaire autour de Vitré.
-        before = None
-        after = None
+    text = current.inner_text()
 
-        if vitre_index > 0:
-            before = block[vitre_index - 1]
+    print("CONTENU DU BLOC :")
+    print(text)
 
-        if vitre_index + 1 < len(block):
-            after = block[vitre_index + 1]
+    date = parse_datetime(text)
 
-        # Certaines pages peuvent insérer des éléments
-        # supplémentaires. On élimine les lignes inutiles.
-        ignored = {
-            "Résultat",
-            "Resultat",
-            "0 0",
-        }
+    if not date:
+        return None
 
-        if before in ignored:
-            before = None
+    # On récupère les liens des équipes présents
+    # dans le bloc du match.
+    team_elements = current.locator("a")
 
-        if after in ignored:
-            after = None
+    teams = []
 
-        # Cas Vitré à domicile :
-        # AURORE VITRE
-        # ADVERSAIRE
-        if after and after.upper() != TEAM:
-            opponent = after
-            domicile = True
+    for i in range(team_elements.count()):
 
-        # Cas Vitré à l'extérieur :
-        # ADVERSAIRE
-        # AURORE VITRE
-        elif before:
-            opponent = before
-            domicile = False
+        try:
 
-        else:
-            continue
+            name = team_elements.nth(i).inner_text().strip()
 
-        # Évite de récupérer "Résultat" ou des éléments du menu.
-        if (
-            opponent.lower() in [
-                "résultat",
-                "resultat",
-                "classement officiel",
-            ]
-            or "AURORE VITRE" in opponent.upper()
-        ):
-            continue
+            if name and name not in teams:
+                teams.append(name)
 
-        matches.append({
-            "journee": journee,
-            "date": date,
-            "opponent": opponent,
-            "domicile": domicile,
-        })
+        except Exception:
+            pass
 
-    return matches
+    print("ÉQUIPES TROUVÉES :", teams)
 
+    # On cherche Vitré dans les équipes.
+    vitre_index = None
 
-def escape(text):
-    return (
-        str(text)
-        .replace("\\", "\\\\")
-        .replace(";", "\\;")
-        .replace(",", "\\,")
-        .replace("\n", "\\n")
-    )
+    for i, team in enumerate(teams):
+
+        if TEAM in team.upper():
+
+            vitre_index = i
+            break
+
+    if vitre_index is None:
+        return None
+
+    # Le match doit contenir exactement deux équipes.
+    # On prend les deux premières équipes pertinentes.
+    if len(teams) < 2:
+        return None
+
+    if vitre_index == 0:
+        opponent = teams[1]
+        domicile = True
+    else:
+        opponent = teams[0]
+        domicile = False
+
+    # Évite de récupérer des liens parasites.
+    if (
+        "CLASSEMENT" in opponent.upper()
+        or "RÉSULTAT" in opponent.upper()
+        or "RESULTAT" in opponent.upper()
+    ):
+        return None
+
+    return {
+        "journee": journee,
+        "date": date,
+        "opponent": opponent,
+        "domicile": domicile,
+    }
 
 
 def generate_ics(matches):
@@ -224,25 +240,27 @@ def generate_ics(matches):
         opponent = match["opponent"]
 
         if match["domicile"]:
+
             summary = (
                 f"Aurore Vitré NM1 - {opponent}"
             )
-            location = "Vitré"
+
+            location = (
+                "Salle de la Poultière, Vitré"
+            )
+
         else:
+
             summary = (
                 f"{opponent} - Aurore Vitré NM1"
             )
+
             location = opponent
 
         uid = (
             f"aurore-vitre-nm1-"
-            f"j{match['journee']}-"
+            f"{match['journee']}-"
             f"{start_str}@github"
-        )
-
-        description = (
-            f"NM1 2026-2027 - "
-            f"Journée {match['journee']}"
         )
 
         lines.extend([
@@ -253,7 +271,7 @@ def generate_ics(matches):
             f"DTEND;TZID=Europe/Paris:{end_str}",
             f"SUMMARY:{escape(summary)}",
             f"LOCATION:{escape(location)}",
-            f"DESCRIPTION:{escape(description)}",
+            f"DESCRIPTION:NM1 2026-2027 - Journée {match['journee']}",
             "END:VEVENT",
         ])
 
@@ -264,7 +282,7 @@ def generate_ics(matches):
 
 def main():
 
-    all_matches = []
+    matches = []
 
     with sync_playwright() as p:
 
@@ -274,10 +292,21 @@ def main():
 
         page = browser.new_page(
             locale="fr-FR",
-            timezone_id="Europe/Paris",
+            timezone_id="Europe/Paris"
         )
 
         for journee in range(1, 27):
+
+            print()
+            print(
+                "================================"
+            )
+            print(
+                f"JOURNÉE {journee}"
+            )
+            print(
+                "================================"
+            )
 
             url = (
                 f"{BASE_URL}"
@@ -286,77 +315,61 @@ def main():
                 f"&poule={POULE}"
             )
 
-            print()
-            print(
-                f"========== JOURNÉE {journee} =========="
-            )
             print(url)
 
             try:
 
                 page.goto(
                     url,
-                    wait_until="domcontentloaded",
+                    wait_until="networkidle",
                     timeout=60000
                 )
 
-                # Le calendrier est chargé dynamiquement.
-                page.wait_for_timeout(3000)
+                # Petite sécurité pour laisser
+                # le rendu FFBB terminer.
+                page.wait_for_timeout(2000)
 
-                text = page.locator(
-                    "body"
-                ).inner_text()
-
-                matches = extract_matches(
-                    text,
+                match = extract_match_from_page(
+                    page,
                     journee
                 )
 
-                if matches:
+                if match:
 
-                    for match in matches:
+                    matches.append(match)
 
-                        print(
-                            f"✓ {match['date']} | "
-                            f"{'DOMICILE' if match['domicile'] else 'EXTÉRIEUR'} | "
-                            f"{match['opponent']}"
-                        )
-
-                    all_matches.extend(matches)
+                    print(
+                        "✓ MATCH TROUVÉ :",
+                        match["date"],
+                        "|",
+                        (
+                            "DOMICILE"
+                            if match["domicile"]
+                            else "EXTÉRIEUR"
+                        ),
+                        "|",
+                        match["opponent"]
+                    )
 
                 else:
 
                     print(
-                        "⚠ Aucun match de Vitré trouvé "
-                        f"pour la journée {journee}"
+                        "⚠ Match non trouvé"
                     )
-
-                    # Affiche le contexte autour de Vitré
-                    # pour faciliter le diagnostic si nécessaire.
-                    position = text.upper().find(
-                        "AURORE VITRE"
-                    )
-
-                    if position >= 0:
-                        print(
-                            text[
-                                max(0, position - 300):
-                                position + 500
-                            ]
-                        )
 
             except Exception as error:
 
                 print(
-                    f"❌ Erreur journée {journee}: {error}"
+                    "❌ Erreur :",
+                    error
                 )
 
         browser.close()
 
-    # Suppression des éventuels doublons.
+    # Suppression des doublons
     unique = {}
 
-    for match in all_matches:
+    for match in matches:
 
         key = (
             match["journee"],
@@ -374,17 +387,21 @@ def main():
     )
 
     print()
-    print("==============================")
     print(
-        f"TOTAL : {len(matches)} MATCH(S)"
+        "================================"
     )
-    print("==============================")
+    print(
+        f"TOTAL : {len(matches)} MATCHS"
+    )
+    print(
+        "================================"
+    )
 
     if len(matches) < 20:
+
         raise RuntimeError(
-            "Moins de 20 matchs trouvés. "
-            "Le calendrier n'a pas été généré "
-            "afin d'éviter de publier un calendrier incomplet."
+            "Moins de 20 matchs récupérés. "
+            "Le fichier ICS ne sera pas publié."
         )
 
     ics = generate_ics(matches)
@@ -394,10 +411,11 @@ def main():
         "w",
         encoding="utf-8"
     ) as file:
+
         file.write(ics)
 
     print(
-        "✓ calendrier.ics généré avec succès."
+        "✓ calendrier.ics généré."
     )
 
 
