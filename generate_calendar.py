@@ -143,89 +143,121 @@ def get_match_container(page, team_element):
 
 def get_date_for_match(page, match_element):
 
-    """
-    Cherche le dernier titre de date avant le match.
-    Les dates de la FFBB sont dans des titres H2.
-    """
+    # La FFBB affiche les dates dans des titres H2 :
+    # "18 septembre 2026 20:00"
+    #
+    # On récupère la position verticale du match
+    # puis on prend la dernière date située juste avant.
 
-    date_pattern = re.compile(
-        r"\d{1,2}\s+"
+    mois = {
+        "janvier": 1,
+        "février": 2,
+        "mars": 3,
+        "avril": 4,
+        "mai": 5,
+        "juin": 6,
+        "juillet": 7,
+        "août": 8,
+        "septembre": 9,
+        "octobre": 10,
+        "novembre": 11,
+        "décembre": 12,
+    }
+
+    pattern = re.compile(
+        r"(\d{1,2})\s+"
         r"(janvier|février|mars|avril|mai|juin|juillet|août|"
         r"septembre|octobre|novembre|décembre)\s+"
-        r"\d{4}\s+"
-        r"\d{1,2}:\d{2}",
+        r"(\d{4})\s+"
+        r"(\d{1,2}):(\d{2})",
         re.IGNORECASE
     )
 
-    headings = page.locator(
-        "h1, h2, h3, h4"
-    )
+    try:
 
-    candidates = []
+        # Position verticale du bloc du match
+        match_box = match_element.bounding_box()
 
-    for i in range(headings.count()):
+        if not match_box:
+            return None
 
-        heading = headings.nth(i)
+        match_y = match_box["y"]
 
-        try:
+        headings = page.locator("h2")
 
-            text = clean(
-                heading.inner_text()
-            )
+        candidates = []
 
-            date = parse_date(text)
+        for i in range(headings.count()):
 
-            if not date:
+            heading = headings.nth(i)
+
+            try:
+
+                text = clean(
+                    heading.inner_text()
+                )
+
+                result = pattern.search(text)
+
+                if not result:
+                    continue
+
+                box = heading.bounding_box()
+
+                if not box:
+                    continue
+
+                heading_y = box["y"]
+
+                # La date doit être avant le match
+                if heading_y < match_y:
+
+                    jour = int(result.group(1))
+                    mois_num = mois[
+                        result.group(2).lower()
+                    ]
+                    annee = int(result.group(3))
+                    heure = int(result.group(4))
+                    minute = int(result.group(5))
+
+                    date = datetime(
+                        annee,
+                        mois_num,
+                        jour,
+                        heure,
+                        minute,
+                        tzinfo=TZ
+                    )
+
+                    candidates.append(
+                        (heading_y, date, text)
+                    )
+
+            except Exception:
                 continue
 
-            # Vérifie que le titre est avant le match
-            is_before = heading.evaluate(
-                """
-                (heading, match) => {
-                    return !!(
-                        heading.compareDocumentPosition(match)
-                        & Node.DOCUMENT_POSITION_FOLLOWING
-                    );
-                }
-                """,
-                match_element
+        if candidates:
+
+            # La dernière date avant le match
+            candidates.sort(
+                key=lambda x: x[0]
             )
 
-            if is_before:
-                candidates.append(date)
+            date = candidates[-1][1]
 
-        except Exception:
-            pass
+            print(
+                f"✓ DATE TROUVÉE : {date}"
+            )
 
-    if candidates:
-        return candidates[-1]
+            return date
 
-    # Sécurité : recherche dans le texte complet.
-    body = page.locator("body").inner_text()
+    except Exception as error:
 
-    match_text = clean(
-        match_element.inner_text()
-    )
-
-    position = body.find(
-        match_text
-    )
-
-    if position >= 0:
-
-        before = body[:position]
-
-        matches = list(
-            date_pattern.finditer(before)
+        print(
+            f"Erreur récupération date : {error}"
         )
 
-        if matches:
-            return parse_date(
-                matches[-1].group(0)
-            )
-
     return None
-
 
 def find_match(page, journee):
 
