@@ -12,16 +12,36 @@ TEAM = "AURORE VITRE BASKET BRETAGNE"
 TZ = ZoneInfo("Europe/Paris")
 
 
+# Toutes les équipes de la poule B.
+TEAMS = [
+    "CENTRE FEDERAL BB",
+    "TOULOUSE BASKETBALL CLUB",
+    "ETOILE ANGERS BASKET",
+    "TOURS METROPOLE BASKET",
+    "LES SABLES VENDEE BASKET",
+    "C’CHARTRES METROPOLE BASKET",
+    "C'CHARTRES METROPOLE BASKET",
+    "UNION RENNES BASKET 35 (URB 35)",
+    "AURORE VITRE BASKET BRETAGNE",
+    "UNION TARBES LOURDES PYRENEES BASKET",
+    "JSA BORDEAUX METROPOLE BASKET",
+    "CEP LORIENT BREIZH BASKET",
+    "US LAVAL BASKET",
+    "VENDEE CHALLANS BASKET",
+    "PAYS DE FOUGERES BASKET",
+]
+
+
 def clean(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
 def normalize(text):
-    text = clean(text)
-    return text.upper()
+    return clean(text).upper()
 
 
 def parse_date(text):
+
     mois = {
         "janvier": 1,
         "février": 2,
@@ -64,266 +84,246 @@ def parse_date(text):
     )
 
 
-def get_team_names(page):
+def get_match_container(page, team_element):
+
     """
-    Récupère les noms des équipes directement
-    depuis les liens présents sur la page FFBB.
+    Remonte dans le DOM jusqu'au plus petit conteneur
+    contenant exactement deux équipes de la poule.
     """
 
-    names = []
+    current = team_element
 
-    links = page.locator("a")
-
-    for i in range(links.count()):
+    for niveau in range(12):
 
         try:
-            text = clean(
-                links.nth(i).inner_text()
-            )
 
-            if not text:
-                continue
+            current = current.locator("..")
 
-            upper = normalize(text)
+            links = current.locator("a")
 
-            # Les équipes de NM1 apparaissent généralement
-            # comme des liens en majuscules.
-            if (
-                len(text) > 5
-                and len(text) < 100
-                and (
-                    "BASKET" in upper
-                    or "BASKETBALL" in upper
-                    or "UNION" in upper
-                    or "ETOILE" in upper
-                    or "TOURS" in upper
-                    or "RENNES" in upper
-                    or "VITRE" in upper
-                    or "ANGERS" in upper
-                    or "LORIENT" in upper
-                    or "LAVAL" in upper
-                    or "FOUGERES" in upper
-                    or "BORDEAUX" in upper
-                    or "TARBES" in upper
-                    or "CHARTRES" in upper
-                    or "CHALLANS" in upper
-                    or "SABLES" in upper
-                )
-            ):
-                if text not in names:
-                    names.append(text)
+            found_teams = []
+
+            for i in range(links.count()):
+
+                try:
+
+                    name = clean(
+                        links.nth(i).inner_text()
+                    )
+
+                    name_upper = normalize(name)
+
+                    for team in TEAMS:
+
+                        if name_upper == normalize(team):
+
+                            if name not in found_teams:
+                                found_teams.append(name)
+
+                            break
+
+                except Exception:
+                    pass
+
+            # C'est notre bloc de match lorsqu'il contient
+            # exactement deux équipes.
+            if len(found_teams) == 2:
+
+                if TEAM in [
+                    normalize(x)
+                    for x in found_teams
+                ]:
+                    return current, found_teams
 
         except Exception:
-            pass
+            break
 
-    return names
+    return None, []
 
 
-def find_match(page, journee):
+def get_date_for_match(page, match_element):
 
-    body = page.locator("body").inner_text()
+    """
+    Cherche le dernier titre de date avant le match.
+    Les dates de la FFBB sont dans des titres H2.
+    """
 
-    body = body.replace("\xa0", " ")
-
-    # Toutes les dates présentes sur la page.
     date_pattern = re.compile(
         r"\d{1,2}\s+"
-        r"(?:janvier|février|mars|avril|mai|juin|juillet|août|"
+        r"(janvier|février|mars|avril|mai|juin|juillet|août|"
         r"septembre|octobre|novembre|décembre)\s+"
         r"\d{4}\s+"
         r"\d{1,2}:\d{2}",
         re.IGNORECASE
     )
 
-    dates = list(date_pattern.finditer(body))
-
-    print(
-        f"Dates trouvées sur la page : {len(dates)}"
+    headings = page.locator(
+        "h1, h2, h3, h4"
     )
 
-    team_names = get_team_names(page)
+    candidates = []
 
-    print(
-        f"Équipes détectées : {len(team_names)}"
-    )
+    for i in range(headings.count()):
 
-    team_upper = normalize(TEAM)
+        heading = headings.nth(i)
 
-    # On recherche Vitré dans le texte.
-    positions = []
+        try:
 
-    start = 0
-
-    while True:
-
-        pos = normalize(body).find(
-            team_upper,
-            start
-        )
-
-        if pos == -1:
-            break
-
-        positions.append(pos)
-        start = pos + len(team_upper)
-
-    print(
-        f"Occurrences de Vitré : {len(positions)}"
-    )
-
-    if not positions:
-        return None
-
-    # On analyse chaque occurrence.
-    for team_pos in positions:
-
-        # -------------------------------------------------
-        # 1. Trouver la dernière date AVANT Vitré
-        # -------------------------------------------------
-
-        current_date = None
-
-        for date_match in dates:
-
-            if date_match.start() < team_pos:
-
-                current_date = parse_date(
-                    date_match.group(0)
-                )
-
-            else:
-                break
-
-        if not current_date:
-            print(
-                "⚠ Date impossible à déterminer"
+            text = clean(
+                heading.inner_text()
             )
-            continue
 
-        print(
-            f"Date associée : {current_date}"
-        )
+            date = parse_date(text)
 
-        # -------------------------------------------------
-        # 2. Chercher l'adversaire autour de Vitré
-        # -------------------------------------------------
-
-        # On prend une grande fenêtre autour du nom.
-        before = body[
-            max(0, team_pos - 300):
-            team_pos
-        ]
-
-        after = body[
-            team_pos + len(TEAM):
-            team_pos + len(TEAM) + 300
-        ]
-
-        before_upper = normalize(before)
-        after_upper = normalize(after)
-
-        candidates = []
-
-        for name in team_names:
-
-            name_upper = normalize(name)
-
-            if name_upper == team_upper:
+            if not date:
                 continue
 
-            # Équipe avant Vitré
-            pos_before = before_upper.rfind(
-                name_upper
+            # Vérifie que le titre est avant le match
+            is_before = heading.evaluate(
+                """
+                (heading, match) => {
+                    return !!(
+                        heading.compareDocumentPosition(match)
+                        & Node.DOCUMENT_POSITION_FOLLOWING
+                    );
+                }
+                """,
+                match_element
             )
 
-            if pos_before >= 0:
+            if is_before:
+                candidates.append(date)
 
-                candidates.append(
-                    (
-                        "before",
-                        pos_before,
-                        name
-                    )
+        except Exception:
+            pass
+
+    if candidates:
+        return candidates[-1]
+
+    # Sécurité : recherche dans le texte complet.
+    body = page.locator("body").inner_text()
+
+    match_text = clean(
+        match_element.inner_text()
+    )
+
+    position = body.find(
+        match_text
+    )
+
+    if position >= 0:
+
+        before = body[:position]
+
+        matches = list(
+            date_pattern.finditer(before)
+        )
+
+        if matches:
+            return parse_date(
+                matches[-1].group(0)
+            )
+
+    return None
+
+
+def find_match(page, journee):
+
+    locator = page.get_by_text(
+        TEAM,
+        exact=True
+    )
+
+    count = locator.count()
+
+    print(
+        f"Occurrences de Vitré : {count}"
+    )
+
+    for i in range(count):
+
+        try:
+
+            team_element = locator.nth(i)
+
+            match_element, teams = get_match_container(
+                page,
+                team_element
+            )
+
+            if not match_element:
+                continue
+
+            print(
+                f"Bloc trouvé : {teams}"
+            )
+
+            if len(teams) != 2:
+                continue
+
+            # Détermine l'adversaire.
+            opponent = None
+
+            for team in teams:
+
+                if normalize(team) != normalize(TEAM):
+
+                    opponent = team
+                    break
+
+            if not opponent:
+                continue
+
+            # Date du match.
+            date = get_date_for_match(
+                page,
+                match_element
+            )
+
+            if not date:
+
+                print(
+                    "⚠ Date non trouvée pour ce bloc"
                 )
 
-            # Équipe après Vitré
-            pos_after = after_upper.find(
-                name_upper
-            )
+                continue
 
-            if pos_after >= 0:
+            # Ordre des équipes dans le bloc :
+            # équipe 1 = domicile
+            # équipe 2 = extérieur.
+            if normalize(teams[0]) == normalize(TEAM):
 
-                candidates.append(
-                    (
-                        "after",
-                        pos_after,
-                        name
-                    )
-                )
+                domicile = True
 
-        if not candidates:
-            print(
-                "⚠ Aucun adversaire détecté"
-            )
-            continue
+            else:
 
-        # Le candidat le plus proche de Vitré.
-        before_candidates = [
-            c for c in candidates
-            if c[0] == "before"
-        ]
-
-        after_candidates = [
-            c for c in candidates
-            if c[0] == "after"
-        ]
-
-        opponent = None
-        domicile = None
-
-        if after_candidates:
-
-            # L'équipe juste après Vitré
-            # est l'adversaire.
-            after_candidates.sort(
-                key=lambda x: x[1]
-            )
-
-            opponent = after_candidates[0][2]
-            domicile = True
-
-        elif before_candidates:
-
-            before_candidates.sort(
-                key=lambda x: x[1],
-                reverse=True
-            )
-
-            opponent = before_candidates[0][2]
-            domicile = False
-
-        if opponent:
+                domicile = False
 
             print(
-                "✓ ADVERSAIRE :",
-                opponent
+                f"✓ DATE : {date}"
+            )
+
+            print(
+                f"✓ ADVERSAIRE : {opponent}"
             )
 
             print(
                 "✓",
-                (
-                    "DOMICILE"
-                    if domicile
-                    else "EXTÉRIEUR"
-                )
+                "DOMICILE" if domicile else "EXTÉRIEUR"
             )
 
             return {
                 "journee": journee,
-                "date": current_date,
+                "date": date,
                 "opponent": opponent,
-                "domicile": domicile
+                "domicile": domicile,
             }
+
+        except Exception as error:
+
+            print(
+                f"Erreur sur occurrence {i}: {error}"
+            )
 
     return None
 
@@ -348,7 +348,7 @@ def generate_ics(matches):
         "CALSCALE:GREGORIAN",
         "METHOD:PUBLISH",
         "X-WR-CALNAME:Aurore Vitré Basket - NM1",
-        "X-WR-TIMEZONE:Europe/Paris"
+        "X-WR-TIMEZONE:Europe/Paris",
     ]
 
     timestamp = datetime.now(
@@ -406,7 +406,7 @@ def generate_ics(matches):
             f"SUMMARY:{escape(summary)}",
             f"LOCATION:{escape(location)}",
             f"DESCRIPTION:NM1 2026-2027 - Journée {match['journee']}",
-            "END:VEVENT"
+            "END:VEVENT",
         ])
 
     lines.append(
@@ -477,16 +477,10 @@ def main():
                     )
 
                     print(
-                        "✓ MATCH :",
-                        match["date"],
-                        "|",
-                        (
-                            "DOMICILE"
-                            if match["domicile"]
-                            else "EXTÉRIEUR"
-                        ),
-                        "|",
-                        match["opponent"]
+                        f"✓ MATCH : "
+                        f"{match['date']} | "
+                        f"{'DOMICILE' if match['domicile'] else 'EXTÉRIEUR'} | "
+                        f"{match['opponent']}"
                     )
 
                 else:
@@ -498,13 +492,12 @@ def main():
             except Exception as error:
 
                 print(
-                    "❌ Erreur :",
-                    error
+                    f"❌ Erreur : {error}"
                 )
 
         browser.close()
 
-    # Suppression des doublons
+    # Suppression des doublons.
     unique = {}
 
     for match in matches:
