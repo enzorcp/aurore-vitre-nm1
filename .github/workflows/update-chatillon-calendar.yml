@@ -3,7 +3,6 @@ name: Mise à jour calendrier Châtillon DM4
 on:
   schedule:
     - cron: "15 6 * * *"
-
   workflow_dispatch:
 
 permissions:
@@ -11,7 +10,6 @@ permissions:
 
 jobs:
   update-chatillon-calendar:
-
     runs-on: ubuntu-latest
 
     steps:
@@ -22,15 +20,26 @@ jobs:
       - name: Installer Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.13"
 
-      - name: Installer les dépendances
+      - name: Installer Playwright
         run: |
-          pip install -r requirements-chatillon.txt
+          python -m pip install --upgrade pip
+          pip install playwright
+
+      - name: Installer Chromium
+        run: |
+          python -m playwright install --with-deps chromium
 
       - name: Générer le calendrier
         run: |
           python generate_chatillon_calendar.py
+
+      - name: Vérifier le fichier
+        run: |
+          test -f calendrier-chatillon.ics
+          echo "Calendrier généré :"
+          wc -l calendrier-chatillon.ics
 
       - name: Enregistrer les modifications
         run: |
