@@ -1,5 +1,6 @@
-from playwright.sync_api import sync_playwright
-from datetime import datetime
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import re
 
@@ -9,11 +10,9 @@ URL = (
     "clubs/bre0035135/equipes/200000005342013"
 )
 
-TEAM = "CHÂTILLON-EN-VENDELAIS BASKET - 2"
 OUTPUT = "calendrier-chatillon.ics"
 
 TZ = ZoneInfo("Europe/Paris")
-
 
 MONTHS = {
     "janv.": 1,
@@ -82,9 +81,6 @@ def parse_date(text):
     if month is None:
         return None
 
-    # Saison 2026-2027
-    # Septembre -> décembre 2026
-    # Janvier -> avril 2027
     if month >= 9:
         year = 2026
     else:
@@ -100,41 +96,74 @@ def parse_date(text):
     )
 
 
-def find_match_blocks(page):
+def get_page_text():
 
-    """
-    La page FFBB contient une structure très régulière :
+    print("Téléchargement de la page FFBB...")
 
-    J1
-    27 sept. 02h00
-    Extérieur
-    ADVERSAIRE
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/128.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "fr-FR,fr;q=0.9",
+    }
 
-    J2
-    4 oct. 02h00
-    Domicile
-    ADVERSAIRE
+    response = requests.get(
+        URL,
+        headers=headers,
+        timeout=60
+    )
 
-    etc.
+    print(f"HTTP : {response.status_code}")
+    print(f"Taille de la page : {len(response.text)} caractères")
 
-    On récupère directement les lignes visibles.
-    """
+    response.raise_for_status()
 
-    body = page.locator("body").inner_text()
+    soup = BeautifulSoup(
+        response.text,
+        "html.parser"
+    )
+
+    return soup.get_text("\n")
+
+
+def find_matches(text):
 
     lines = [
         clean(line)
-        for line in body.splitlines()
+        for line in text.splitlines()
         if clean(line)
     ]
 
-    matches = []
+    try:
+        start = next(
+            i for i, line in enumerate(lines)
+            if line == "Calendrier"
+        )
+    except StopIteration:
 
+        raise RuntimeError(
+            "Impossible de trouver la section 'Calendrier' "
+            "sur la page FFBB."
+        )
+
+    end = len(lines)
+
+    for i in range(start + 1, len(lines)):
+
+        if "Datas de l'équipe" in lines[i]:
+            end = i
+            break
+
+    lines = lines[start:end]
+
+    matches = []
     current = None
 
     for line in lines:
 
-        # Nouvelle journée
         journey_match = re.fullmatch(
             r"J(\d+)",
             line
@@ -142,7 +171,6 @@ def find_match_blocks(page):
 
         if journey_match:
 
-            # Sauvegarde le match précédent
             if current is not None:
 
                 if (
@@ -166,7 +194,6 @@ def find_match_blocks(page):
         if current is None:
             continue
 
-        # Date / heure
         if current["date"] is None:
 
             parsed = parse_date(line)
@@ -176,7 +203,6 @@ def find_match_blocks(page):
                 current["date"] = parsed
                 continue
 
-        # Domicile / extérieur
         if line == "Domicile":
 
             current["domicile"] = True
@@ -187,15 +213,12 @@ def find_match_blocks(page):
             current["domicile"] = False
             continue
 
-        # Une fois qu'on connaît date + domicile/extérieur,
-        # le prochain nom d'équipe est l'adversaire.
         if (
             current["date"] is not None
             and current["domicile"] is not None
             and current["opponent"] is None
         ):
 
-            # On ignore les éléments non pertinents.
             if line in [
                 "00",
                 "Résultat",
@@ -203,21 +226,13 @@ def find_match_blocks(page):
             ]:
                 continue
 
-            # On ignore les éléments de navigation.
             if line.startswith("#"):
                 continue
 
-            # L'adversaire est le nom du club.
-            # On exclut les lignes manifestement hors match.
-            if (
-                len(line) >= 3
-                and not line.startswith("J")
-                and line != TEAM
-            ):
+            if len(line) >= 3:
 
                 current["opponent"] = line
 
-    # Dernier match
     if current is not None:
 
         if (
@@ -250,11 +265,8 @@ def generate_ics(matches):
 
         start = match["date"]
 
-        # Durée par défaut de 2 heures.
-        # Si l'heure est modifiée sur FFBB,
-        # le calendrier sera automatiquement mis à jour.
-        end = start.replace(
-            hour=(start.hour + 2) % 24
+        end = start + timedelta(
+            hours=2
         )
 
         start_str = start.strftime(
@@ -274,9 +286,7 @@ def generate_ics(matches):
                 f"{opponent}"
             )
 
-            location = (
-                "Châtillon-en-Vendelais"
-            )
+            location = "Châtillon-en-Vendelais"
 
         else:
 
@@ -310,74 +320,24 @@ def generate_ics(matches):
             "END:VEVENT",
         ])
 
-    lines.append(
-        "END:VCALENDAR"
-    )
+    lines.append("END:VCALENDAR")
 
     return "\r\n".join(lines) + "\r\n"
 
 
 def main():
 
-    print("Ouverture de la page FFBB...")
-
-    with sync_playwright() as p:
-
-        browser = p.chromium.launch(
-            headless=True
-        )
-
-        page = browser.new_page(
-            locale="fr-FR",
-            timezone_id="Europe/Paris"
-        )
-
-        page.goto(
-            URL,
-            wait_until="networkidle",
-            timeout=60000
-        )
-
-        page.wait_for_timeout(
-            2000
-        )
-
-        matches = find_match_blocks(
-            page
-        )
-
-        browser.close()
-
+    print("================================")
+    print("CALENDRIER CHÂTILLON DM4")
+    print("================================")
     print()
-    print(
-        "================================"
-    )
-    print(
-        f"MATCHS TROUVÉS : {len(matches)}"
-    )
-    print(
-        "================================"
-    )
 
-    for match in matches:
+    text = get_page_text()
 
-        print(
-            f"J{match['journee']} | "
-            f"{match['date']} | "
-            f"{'DOMICILE' if match['domicile'] else 'EXTÉRIEUR'} | "
-            f"{match['opponent']}"
-        )
+    print("Analyse du calendrier FFBB...")
 
-    # La page FFBB affiche actuellement 20 matchs :
-    # J1-J6, J8-J17 et J19-J22.
-    if len(matches) < 18:
+    matches = find_matches(text)
 
-        raise RuntimeError(
-            "Trop peu de matchs récupérés. "
-            "Le fichier ICS ne sera pas publié."
-        )
-
-    # Suppression des éventuels doublons.
     unique = {}
 
     for match in matches:
@@ -391,17 +351,34 @@ def main():
 
         unique[key] = match
 
-    matches = list(
-        unique.values()
-    )
+    matches = list(unique.values())
 
     matches.sort(
         key=lambda x: x["date"]
     )
 
-    ics = generate_ics(
-        matches
-    )
+    print()
+    print("================================")
+    print(f"MATCHS TROUVÉS : {len(matches)}")
+    print("================================")
+
+    for match in matches:
+
+        print(
+            f"J{match['journee']} | "
+            f"{match['date'].strftime('%d/%m/%Y %H:%M')} | "
+            f"{'DOMICILE' if match['domicile'] else 'EXTÉRIEUR'} | "
+            f"{match['opponent']}"
+        )
+
+    if len(matches) < 18:
+
+        raise RuntimeError(
+            f"Seulement {len(matches)} matchs récupérés. "
+            "Le fichier ICS ne sera pas publié."
+        )
+
+    ics = generate_ics(matches)
 
     with open(
         OUTPUT,
@@ -409,9 +386,7 @@ def main():
         encoding="utf-8"
     ) as file:
 
-        file.write(
-            ics
-        )
+        file.write(ics)
 
     print()
     print(
