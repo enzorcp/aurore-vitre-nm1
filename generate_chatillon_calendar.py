@@ -9,17 +9,25 @@ OUTPUT_FILE = "calendrier-chatillon.ics"
 
 MONTHS = {
     "janv.": 1,
+    "janvier": 1,
     "févr.": 2,
+    "février": 2,
     "mars": 3,
     "avr.": 4,
+    "avril": 4,
     "mai": 5,
     "juin": 6,
     "juil.": 7,
+    "juillet": 7,
     "août": 8,
     "sept.": 9,
+    "septembre": 9,
     "oct.": 10,
+    "octobre": 10,
     "nov.": 11,
+    "novembre": 11,
     "déc.": 12,
+    "décembre": 12,
 }
 
 
@@ -51,7 +59,7 @@ def get_page_text():
         if response:
             print(f"HTTP : {response.status}")
 
-        # Laisser le temps à FFBB de charger complètement le calendrier
+        # Laisser FFBB charger complètement le calendrier
         page.wait_for_timeout(5000)
 
         text = page.locator("body").inner_text()
@@ -63,16 +71,20 @@ def get_page_text():
         return text
 
 
-def parse_date(date_text):
+def parse_date_and_time(line):
     """
-    Transforme par exemple :
-    '27 sept. 02h00'
-    en datetime.
+    Recherche une date et une heure directement dans une ligne.
+
+    Exemples acceptés :
+        27 sept. 20h15
+        4 oct. 10h30
+        8 nov. 01h00
+        4 avr. 02h00
     """
 
     match = re.search(
-        r"(\d{1,2})\s+([a-zéû.]+)\s+(\d{1,2})h(\d{2})",
-        date_text,
+        r"(\d{1,2})\s+([A-Za-zÀ-ÿ.]+)\s+(\d{1,2})h(\d{2})",
+        line,
         re.IGNORECASE,
     )
 
@@ -86,12 +98,10 @@ def parse_date(date_text):
 
     month = MONTHS.get(month_name)
 
-    if not month:
+    if month is None:
         return None
 
     # Saison 2026-2027
-    # Septembre -> décembre = 2026
-    # Janvier -> avril = 2027
     year = 2026 if month >= 9 else 2027
 
     return datetime(
@@ -105,7 +115,10 @@ def parse_date(date_text):
 
 def find_matches(text):
     """
-    Analyse le texte de la page FFBB et récupère les matchs.
+    Récupère les matchs à partir du calendrier affiché par FFBB.
+
+    L'heure récupérée est l'heure affichée par FFBB.
+    Aucune conversion de fuseau horaire n'est effectuée.
     """
 
     lines = [
@@ -119,7 +132,11 @@ def find_matches(text):
     for i, line in enumerate(lines):
 
         # Recherche d'une journée : J1, J2, J3...
-        journee_match = re.fullmatch(r"J(\d+)", line)
+        journee_match = re.fullmatch(
+            r"J(\d+)",
+            line,
+            re.IGNORECASE,
+        )
 
         if not journee_match:
             continue
@@ -130,77 +147,90 @@ def find_matches(text):
         domicile = None
         opponent = None
 
-        # On regarde les lignes suivantes
-        for j in range(i + 1, min(i + 10, len(lines))):
+        # On analyse uniquement le bloc correspondant à cette journée.
+        # On s'arrête lorsqu'une nouvelle journée apparaît.
+        for j in range(i + 1, min(i + 20, len(lines))):
 
             current = lines[j]
 
-            # Date + heure
+            # Nouvelle journée : fin du bloc actuel
+            if re.fullmatch(
+                r"J(\d+)",
+                current,
+                re.IGNORECASE,
+            ):
+                break
+
+            # Recherche directe de la date + heure affichées
             if date_value is None:
-                parsed = parse_date(current)
+
+                parsed = parse_date_and_time(current)
 
                 if parsed:
                     date_value = parsed
                     continue
 
             # Domicile / extérieur
-            if current in ("Domicile", "Extérieur"):
-                domicile = current == "Domicile"
+            if current.lower() == "domicile":
+                domicile = True
                 continue
 
-            # On ignore les résultats et éléments inutiles
-            if current in (
-                "00",
-                "01",
-                "02",
-                "03",
-                "04",
-                "05",
-                "#",
+            if current.lower() == "extérieur":
+                domicile = False
+                continue
+
+            # Une fois les informations principales récupérées,
+            # la prochaine ligne pertinente est l'adversaire.
+            if (
+                date_value is not None
+                and domicile is not None
+                and opponent is None
             ):
-                continue
 
-            if re.fullmatch(r"\d+", current):
-                continue
+                ignored = {
+                    "calendrier",
+                    "résultats",
+                    "classement",
+                    "domicile",
+                    "extérieur",
+                }
 
-            # Une fois la date et le statut trouvés,
-            # la prochaine ligne correspond généralement à l'adversaire.
-            if date_value and domicile is not None:
-                if (
-                    current
-                    not in (
-                        "Calendrier",
-                        "Résultats",
-                        "Classement",
-                        "Domicile",
-                        "Extérieur",
-                    )
-                    and not current.startswith("J")
-                ):
-                    opponent = current
-                    break
+                if current.lower() not in ignored:
+
+                    # On ignore les nombres seuls
+                    if not re.fullmatch(r"\d+", current):
+
+                        # On ignore les heures seules éventuelles
+                        if not re.fullmatch(
+                            r"\d{1,2}h\d{2}",
+                            current,
+                            re.IGNORECASE,
+                        ):
+
+                            opponent = current
+
+                            break
 
         if date_value and domicile is not None and opponent:
 
-            # Évite de récupérer une ligne qui n'est pas un adversaire
-            if len(opponent) > 2:
+            matches.append(
+                {
+                    "journee": journee,
+                    "date": date_value,
+                    "domicile": domicile,
+                    "opponent": opponent,
+                }
+            )
 
-                matches.append(
-                    {
-                        "journee": journee,
-                        "date": date_value,
-                        "domicile": domicile,
-                        "opponent": opponent,
-                    }
-                )
-
-    # Suppression des éventuels doublons
+    # Suppression des doublons
     unique = {}
 
     for match in matches:
+
         key = (
             match["journee"],
             match["date"].strftime("%Y-%m-%d"),
+            match["date"].strftime("%H:%M"),
             match["opponent"],
         )
 
@@ -221,7 +251,7 @@ def find_matches(text):
 
 def escape_ics(value):
     """
-    Échappe les caractères spéciaux nécessaires au format ICS.
+    Échappe les caractères spéciaux du format ICS.
     """
 
     return (
@@ -238,10 +268,12 @@ def generate_ics(matches):
     Génère le fichier ICS.
 
     IMPORTANT :
-    Les heures sont volontairement écrites sans fuseau horaire
-    afin d'éviter le décalage +1h en hiver / +2h en été.
+    Les heures sont des heures locales flottantes.
 
-    Les matchs Châtillon apparaîtront donc à 00h00.
+    Cela signifie que si FFBB indique 20h15,
+    l'ICS contient exactement 20h15.
+
+    Aucune conversion été/hiver n'est appliquée.
     """
 
     lines = [
@@ -253,8 +285,11 @@ def generate_ics(matches):
         "X-WR-CALNAME:Châtillon-en-Vendelais Basket 2 - DM4",
     ]
 
-    # DTSTAMP en UTC
-    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    # DTSTAMP n'est pas l'heure du match.
+    # Il sert uniquement à indiquer quand l'événement a été généré.
+    timestamp = datetime.utcnow().strftime(
+        "%Y%m%dT%H%M%SZ"
+    )
 
     for match in matches:
 
@@ -263,14 +298,37 @@ def generate_ics(matches):
         date_str = start.strftime("%Y%m%d")
 
         # IMPORTANT :
-        # Pas de TZID et pas de conversion UTC.
-        # Le match reste donc à 00h00.
-        start_str = date_str + "T000000"
-        end_str = date_str + "T020000"
+        # On utilise directement l'heure récupérée sur FFBB.
+        #
+        # Exemple :
+        # FFBB = 20h15
+        # ICS  = 20260927T201500
+        #
+        # Aucun TZID.
+        # Aucune conversion UTC.
+        start_str = start.strftime(
+            "%Y%m%dT%H%M%S"
+        )
+
+        # Durée de 2 heures, sans modifier l'heure de début.
+        end = start.replace(
+            hour=start.hour,
+            minute=start.minute,
+        )
+
+        # On ajoute 2 heures à la durée
+        from datetime import timedelta
+
+        end = start + timedelta(hours=2)
+
+        end_str = end.strftime(
+            "%Y%m%dT%H%M%S"
+        )
 
         opponent = match["opponent"]
 
         if match["domicile"]:
+
             summary = (
                 "Châtillon-en-Vendelais Basket 2 - "
                 + opponent
@@ -279,6 +337,7 @@ def generate_ics(matches):
             location = "Châtillon-en-Vendelais"
 
         else:
+
             summary = (
                 opponent
                 + " - Châtillon-en-Vendelais Basket 2"
@@ -325,21 +384,25 @@ def main():
 
     matches = find_matches(text)
 
+    print()
     print(f"Matchs trouvés : {len(matches)}")
+    print()
 
     if len(matches) < 18:
-        print()
+
         print("ERREUR : trop peu de matchs trouvés.")
         print("Le calendrier FFBB a peut-être changé.")
         print()
+
         raise RuntimeError(
             f"Seulement {len(matches)} matchs trouvés."
         )
 
-    print()
     print("Matchs détectés :")
+    print()
 
     for match in matches:
+
         statut = (
             "Domicile"
             if match["domicile"]
@@ -349,6 +412,7 @@ def main():
         print(
             f"J{match['journee']} | "
             f"{match['date'].strftime('%d/%m/%Y')} | "
+            f"{match['date'].strftime('%Hh%M')} | "
             f"{statut} | "
             f"{match['opponent']}"
         )
