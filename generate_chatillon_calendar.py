@@ -1,5 +1,4 @@
-import requests
-from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import re
@@ -81,10 +80,7 @@ def parse_date(text):
     if month is None:
         return None
 
-    if month >= 9:
-        year = 2026
-    else:
-        year = 2027
+    year = 2026 if month >= 9 else 2027
 
     return datetime(
         year,
@@ -98,35 +94,64 @@ def parse_date(text):
 
 def get_page_text():
 
-    print("Téléchargement de la page FFBB...")
+    print("Ouverture de la page FFBB avec Chromium...")
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/128.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "fr-FR,fr;q=0.9",
-    }
+    with sync_playwright() as p:
 
-    response = requests.get(
-        URL,
-        headers=headers,
-        timeout=60
-    )
+        browser = p.chromium.launch(
+            headless=True
+        )
 
-    print(f"HTTP : {response.status_code}")
-    print(f"Taille de la page : {len(response.text)} caractères")
+        page = browser.new_page(
+            locale="fr-FR",
+            timezone_id="Europe/Paris",
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            viewport={
+                "width": 1920,
+                "height": 1080
+            }
+        )
 
-    response.raise_for_status()
+        print("Chargement de la page...")
 
-    soup = BeautifulSoup(
-        response.text,
-        "html.parser"
-    )
+        response = page.goto(
+            URL,
+            wait_until="domcontentloaded",
+            timeout=60000
+        )
 
-    return soup.get_text("\n")
+        if response:
+            print(
+                f"HTTP : {response.status}"
+            )
+
+        page.wait_for_timeout(5000)
+
+        text = page.locator("body").inner_text(
+            timeout=30000
+        )
+
+        print(
+            f"Taille du texte récupéré : "
+            f"{len(text)} caractères"
+        )
+
+        if len(text) < 1000:
+
+            print(
+                "ATTENTION : contenu FFBB très court."
+            )
+
+            print(text[:2000])
+
+        browser.close()
+
+    return text
 
 
 def find_matches(text):
@@ -137,16 +162,24 @@ def find_matches(text):
         if clean(line)
     ]
 
-    try:
-        start = next(
-            i for i, line in enumerate(lines)
-            if line == "Calendrier"
-        )
-    except StopIteration:
+    print(
+        f"Nombre de lignes analysables : {len(lines)}"
+    )
+
+    start = None
+
+    for i, line in enumerate(lines):
+
+        if line.lower() == "calendrier":
+
+            start = i
+            break
+
+    if start is None:
 
         raise RuntimeError(
-            "Impossible de trouver la section 'Calendrier' "
-            "sur la page FFBB."
+            "Section 'Calendrier' introuvable "
+            "dans la page FFBB."
         )
 
     end = len(lines)
@@ -154,36 +187,40 @@ def find_matches(text):
     for i in range(start + 1, len(lines)):
 
         if "Datas de l'équipe" in lines[i]:
+
             end = i
             break
 
-    lines = lines[start:end]
+    calendar_lines = lines[start:end]
+
+    print(
+        f"Lignes de calendrier : "
+        f"{len(calendar_lines)}"
+    )
 
     matches = []
     current = None
 
-    for line in lines:
+    for line in calendar_lines:
 
-        journey_match = re.fullmatch(
+        match_j = re.fullmatch(
             r"J(\d+)",
             line
         )
 
-        if journey_match:
+        if match_j:
 
             if current is not None:
 
                 if (
-                    current.get("date")
-                    and current.get("opponent")
-                    and current.get("domicile") is not None
+                    current["date"]
+                    and current["domicile"] is not None
+                    and current["opponent"]
                 ):
                     matches.append(current)
 
             current = {
-                "journee": int(
-                    journey_match.group(1)
-                ),
+                "journee": int(match_j.group(1)),
                 "date": None,
                 "domicile": None,
                 "opponent": None,
@@ -219,14 +256,14 @@ def find_matches(text):
             and current["opponent"] is None
         ):
 
+            if line.startswith("#"):
+                continue
+
             if line in [
                 "00",
                 "Résultat",
                 "Resultat",
             ]:
-                continue
-
-            if line.startswith("#"):
                 continue
 
             if len(line) >= 3:
@@ -236,11 +273,30 @@ def find_matches(text):
     if current is not None:
 
         if (
-            current.get("date")
-            and current.get("opponent")
-            and current.get("domicile") is not None
+            current["date"]
+            and current["domicile"] is not None
+            and current["opponent"]
         ):
             matches.append(current)
+
+    unique = {}
+
+    for match in matches:
+
+        key = (
+            match["journee"],
+            match["date"],
+            match["domicile"],
+            match["opponent"],
+        )
+
+        unique[key] = match
+
+    matches = list(unique.values())
+
+    matches.sort(
+        key=lambda x: x["date"]
+    )
 
     return matches
 
@@ -264,10 +320,7 @@ def generate_ics(matches):
     for match in matches:
 
         start = match["date"]
-
-        end = start + timedelta(
-            hours=2
-        )
+        end = start + timedelta(hours=2)
 
         start_str = start.strftime(
             "%Y%m%dT%H%M%S"
@@ -286,7 +339,9 @@ def generate_ics(matches):
                 f"{opponent}"
             )
 
-            location = "Châtillon-en-Vendelais"
+            location = (
+                "Châtillon-en-Vendelais"
+            )
 
         else:
 
@@ -298,10 +353,9 @@ def generate_ics(matches):
             location = opponent
 
         uid = (
-            f"chatillon-dm4-"
-            f"j{match['journee']}-"
-            f"{start.strftime('%Y%m%d%H%M')}"
-            "@github"
+            f"chatillon-dm4-j"
+            f"{match['journee']}-"
+            f"{start.strftime('%Y%m%d%H%M')}@github"
         )
 
         lines.extend([
@@ -314,8 +368,8 @@ def generate_ics(matches):
             f"LOCATION:{escape_ics(location)}",
             (
                 "DESCRIPTION:"
-                "Châtillon-en-Vendelais Basket 2 - DM4 - "
-                f"Journée {match['journee']}"
+                "Châtillon-en-Vendelais Basket 2 - "
+                f"DM4 - Journée {match['journee']}"
             ),
             "END:VEVENT",
         ])
@@ -327,40 +381,21 @@ def generate_ics(matches):
 
 def main():
 
-    print("================================")
+    print("========================================")
     print("CALENDRIER CHÂTILLON DM4")
-    print("================================")
-    print()
+    print("========================================")
 
     text = get_page_text()
 
-    print("Analyse du calendrier FFBB...")
+    print()
+    print("Analyse du calendrier...")
 
     matches = find_matches(text)
 
-    unique = {}
-
-    for match in matches:
-
-        key = (
-            match["journee"],
-            match["date"],
-            match["domicile"],
-            match["opponent"],
-        )
-
-        unique[key] = match
-
-    matches = list(unique.values())
-
-    matches.sort(
-        key=lambda x: x["date"]
-    )
-
     print()
-    print("================================")
+    print("========================================")
     print(f"MATCHS TROUVÉS : {len(matches)}")
-    print("================================")
+    print("========================================")
 
     for match in matches:
 
