@@ -310,25 +310,23 @@ def generate_ics(matches):
         "CALSCALE:GREGORIAN",
         "METHOD:PUBLISH",
         "X-WR-CALNAME:Châtillon-en-Vendelais Basket 2 - DM4",
-        "X-WR-TIMEZONE:Europe/Paris",
     ]
 
+    # DTSTAMP doit être en UTC
     timestamp = datetime.now(
-        TZ
-    ).strftime("%Y%m%dT%H%M%S")
+        ZoneInfo("UTC")
+    ).strftime("%Y%m%dT%H%M%SZ")
 
     for match in matches:
 
+        # On conserve exactement 00h00,
+        # sans aucun fuseau horaire.
         start = match["date"]
-        end = start + timedelta(hours=2)
 
-        start_str = start.strftime(
-            "%Y%m%dT%H%M%S"
-        )
+        date_str = start.strftime("%Y%m%d")
 
-        end_str = end.strftime(
-            "%Y%m%dT%H%M%S"
-        )
+        start_str = date_str + "T000000"
+        end_str = date_str + "T020000"
 
         opponent = match["opponent"]
 
@@ -339,9 +337,7 @@ def generate_ics(matches):
                 f"{opponent}"
             )
 
-            location = (
-                "Châtillon-en-Vendelais"
-            )
+            location = "Châtillon-en-Vendelais"
 
         else:
 
@@ -355,15 +351,15 @@ def generate_ics(matches):
         uid = (
             f"chatillon-dm4-j"
             f"{match['journee']}-"
-            f"{start.strftime('%Y%m%d%H%M')}@github"
+            f"{date_str}@github"
         )
 
         lines.extend([
             "BEGIN:VEVENT",
             f"UID:{uid}",
             f"DTSTAMP:{timestamp}",
-            f"DTSTART;TZID=Europe/Paris:{start_str}",
-            f"DTEND;TZID=Europe/Paris:{end_str}",
+            f"DTSTART:{start_str}",
+            f"DTEND:{end_str}",
             f"SUMMARY:{escape_ics(summary)}",
             f"LOCATION:{escape_ics(location)}",
             (
@@ -377,9 +373,9 @@ def generate_ics(matches):
     lines.append("END:VCALENDAR")
 
     return "\r\n".join(lines) + "\r\n"
-
-
-def main():
+    
+    
+    def main():
 
     print("========================================")
     print("CALENDRIER CHÂTILLON DM4")
