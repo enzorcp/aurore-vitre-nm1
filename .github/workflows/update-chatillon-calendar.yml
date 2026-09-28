@@ -24,18 +24,21 @@ jobs:
       - name: Installer les dépendances
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4
+          pip install playwright
+
+      - name: Installer Chromium
+        run: |
+          python -m playwright install --with-deps chromium
 
       - name: Générer le calendrier
         run: |
           python generate_chatillon_calendar.py
 
-      - name: Vérifier le calendrier
+      - name: Vérifier le fichier ICS
         run: |
           test -f calendrier-chatillon.ics
           echo "Calendrier généré :"
-          wc -l calendrier-chatillon.ics
-          head -n 10 calendrier-chatillon.ics
+          grep -c "BEGIN:VEVENT" calendrier-chatillon.ics
 
       - name: Enregistrer les modifications
         run: |
