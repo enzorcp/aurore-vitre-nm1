@@ -1,112 +1,106 @@
 from playwright.sync_api import sync_playwright
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 import re
 
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-URL = (
-    "https://competitions.ffbb.com/ligues/bre/comites/0035/"
-    "clubs/bre0035110/equipes/200000005334552"
-)
-
-TEAM = "VITRE"
-
-OUTPUT = "calendrier.ics"
-
-TZ = ZoneInfo("Europe/Paris")
+URL = "https://competitions.ffbb.com/ligues/bre/comites/0035/clubs/bre0035110/equipes/200000005334552"
+OUTPUT_FILE = "calendrier.ics"
 
 
-# Mois affichés par la FFBB
 MONTHS = {
     "janv.": 1,
-    "janv": 1,
+    "janvier": 1,
     "févr.": 2,
-    "févr": 2,
+    "février": 2,
     "mars": 3,
     "avr.": 4,
-    "avr": 4,
+    "avril": 4,
     "mai": 5,
     "juin": 6,
     "juil.": 7,
-    "juil": 7,
+    "juillet": 7,
     "août": 8,
-    "aout": 8,
     "sept.": 9,
-    "sept": 9,
+    "septembre": 9,
     "oct.": 10,
-    "oct": 10,
+    "octobre": 10,
     "nov.": 11,
-    "nov": 11,
+    "novembre": 11,
     "déc.": 12,
-    "déc": 12,
-    "dec.": 12,
-    "dec": 12,
+    "décembre": 12,
 }
 
 
-# ============================================================
-# OUTILS
-# ============================================================
+def get_page_text():
+    print("Téléchargement de la page FFBB...")
 
-def clean(text):
-    return re.sub(r"\s+", " ", text).strip()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+
+        context = browser.new_context(
+            locale="fr-FR",
+            timezone_id="Europe/Paris",
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1920, "height": 1080},
+        )
+
+        page = context.new_page()
+
+        response = page.goto(
+            URL,
+            wait_until="domcontentloaded",
+            timeout=60000,
+        )
+
+        if response:
+            print(f"HTTP : {response.status}")
+
+        page.wait_for_timeout(5000)
+
+        text = page.locator("body").inner_text()
+
+        print(f"Taille de la page : {len(text)} caractères")
+
+        browser.close()
+
+        return text
 
 
-def escape_ics(text):
-    return (
-        str(text)
-        .replace("\\", "\\\\")
-        .replace(";", "\\;")
-        .replace(",", "\\,")
-        .replace("\n", "\\n")
-    )
-
-
-def parse_date(text):
+def parse_date_and_time(line):
     """
-    La FFBB affiche par exemple :
+    Recherche une date + heure directement dans la ligne.
 
+    Exemples :
     18 sept. 22h00
     25 sept. 22h30
     29 sept. 22h30
-
-    L'année n'est pas affichée.
-    On utilise donc la saison 2026-2027.
     """
 
-    pattern = re.compile(
-        r"^(\d{1,2})\s+"
-        r"(janv\.?|févr\.?|mars|avr\.?|mai|juin|"
-        r"juil\.?|août|aout|sept\.?|oct\.?|nov\.?|"
-        r"déc\.?|dec\.?)\s+"
-        r"(\d{1,2})h(\d{2})$",
-        re.IGNORECASE
+    match = re.search(
+        r"(\d{1,2})\s+([A-Za-zÀ-ÿ.]+)\s+(\d{1,2})h(\d{2})",
+        line,
+        re.IGNORECASE,
     )
-
-    match = pattern.match(clean(text))
 
     if not match:
         return None
 
     day = int(match.group(1))
-    month_text = match.group(2).lower()
+    month_name = match.group(2).lower()
     hour = int(match.group(3))
     minute = int(match.group(4))
 
-    month = MONTHS.get(month_text)
+    month = MONTHS.get(month_name)
 
     if month is None:
         return None
 
     # Saison 2026-2027
-    if month >= 9:
-        year = 2026
-    else:
-        year = 2027
+    year = 2026 if month >= 9 else 2027
 
     return datetime(
         year,
@@ -114,222 +108,177 @@ def parse_date(text):
         day,
         hour,
         minute,
-        tzinfo=TZ
     )
 
 
-# ============================================================
-# RECUPERATION DES MATCHS
-# ============================================================
+def find_matches(text):
+    """
+    Récupère les matchs directement depuis le calendrier FFBB.
 
-def get_matches(page):
-
-    print()
-    print("================================")
-    print("LECTURE DU CALENDRIER FFBB")
-    print("================================")
-    print(URL)
-    print()
-
-    body = page.locator("body").inner_text()
+    L'heure récupérée est exactement celle affichée par FFBB.
+    Aucune conversion de fuseau horaire.
+    """
 
     lines = [
-        clean(line)
-        for line in body.splitlines()
-        if clean(line)
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
     ]
 
     matches = []
 
-    current_journee = None
-    current_date = None
-    current_domicile = None
+    for i, line in enumerate(lines):
 
-    # On commence réellement au premier J1
-    started = False
-
-    i = 0
-
-    while i < len(lines):
-
-        line = lines[i]
-
-        # ----------------------------------------------------
-        # FIN DU CALENDRIER
-        # ----------------------------------------------------
-
-        if line.startswith("Datas de l'équipe"):
-            break
-
-        # ----------------------------------------------------
-        # JOURNEE
-        # ----------------------------------------------------
-
-        match_j = re.fullmatch(
+        journee_match = re.fullmatch(
             r"J(\d+)",
-            line
+            line,
+            re.IGNORECASE,
         )
 
-        if match_j:
-
-            started = True
-
-            current_journee = int(
-                match_j.group(1)
-            )
-
-            current_date = None
-            current_domicile = None
-
-            print(
-                f"JOURNÉE {current_journee}"
-            )
-
-            i += 1
+        if not journee_match:
             continue
 
-        if not started:
-            i += 1
-            continue
+        journee = int(journee_match.group(1))
 
-        # ----------------------------------------------------
-        # DATE
-        # ----------------------------------------------------
+        date_value = None
+        domicile = None
+        opponent = None
 
-        parsed_date = parse_date(line)
+        # Analyse du bloc de cette journée
+        for j in range(i + 1, min(i + 20, len(lines))):
 
-        if parsed_date:
+            current = lines[j]
 
-            current_date = parsed_date
+            # Nouvelle journée = fin du bloc
+            if re.fullmatch(
+                r"J(\d+)",
+                current,
+                re.IGNORECASE,
+            ):
+                break
 
-            print(
-                f"  DATE : {current_date}"
-            )
+            # Date + heure affichées par FFBB
+            if date_value is None:
 
-            i += 1
-            continue
+                parsed = parse_date_and_time(current)
 
-        # ----------------------------------------------------
-        # DOMICILE / EXTERIEUR
-        # ----------------------------------------------------
+                if parsed:
+                    date_value = parsed
+                    continue
 
-        if line == "Domicile":
+            # Domicile / extérieur
+            if current.lower() == "domicile":
+                domicile = True
+                continue
 
-            current_domicile = True
+            if current.lower() == "extérieur":
+                domicile = False
+                continue
 
-            i += 1
+            # Recherche de l'adversaire
+            if (
+                date_value is not None
+                and domicile is not None
+                and opponent is None
+            ):
 
-            # L'adversaire est normalement juste après.
-            if i < len(lines):
+                ignored = {
+                    "calendrier",
+                    "résultats",
+                    "classement",
+                    "domicile",
+                    "extérieur",
+                }
 
-                opponent = lines[i]
+                if current.lower() in ignored:
+                    continue
 
-                # Protection contre les éléments parasites
-                if (
-                    opponent not in [
-                        "00",
-                        "Résultat",
-                        "Resultat",
-                    ]
-                    and not re.fullmatch(
-                        r"#\d+",
-                        opponent
-                    )
-                    and not opponent.startswith("J")
+                if re.fullmatch(r"\d+", current):
+                    continue
+
+                if re.fullmatch(
+                    r"\d{1,2}h\d{2}",
+                    current,
+                    re.IGNORECASE,
                 ):
+                    continue
 
-                    if current_date is not None:
+                opponent = current
+                break
 
-                        matches.append({
-                            "journee": current_journee,
-                            "date": current_date,
-                            "domicile": True,
-                            "opponent": opponent,
-                        })
+        if date_value and domicile is not None and opponent:
 
-                        print(
-                            f"  ✓ DOMICILE : {opponent}"
-                        )
+            matches.append(
+                {
+                    "journee": journee,
+                    "date": date_value,
+                    "domicile": domicile,
+                    "opponent": opponent,
+                }
+            )
 
-            i += 1
-            continue
+    # Suppression des doublons
+    unique = {}
 
-        if line == "Extérieur":
+    for match in matches:
 
-            current_domicile = False
+        key = (
+            match["journee"],
+            match["date"].strftime("%Y-%m-%d"),
+            match["date"].strftime("%H:%M"),
+            match["opponent"],
+        )
 
-            i += 1
+        unique[key] = match
 
-            # L'adversaire est normalement juste après.
-            if i < len(lines):
+    matches = list(unique.values())
 
-                opponent = lines[i]
-
-                if (
-                    opponent not in [
-                        "00",
-                        "Résultat",
-                        "Resultat",
-                    ]
-                    and not re.fullmatch(
-                        r"#\d+",
-                        opponent
-                    )
-                    and not opponent.startswith("J")
-                ):
-
-                    if current_date is not None:
-
-                        matches.append({
-                            "journee": current_journee,
-                            "date": current_date,
-                            "domicile": False,
-                            "opponent": opponent,
-                        })
-
-                        print(
-                            f"  ✓ EXTÉRIEUR : {opponent}"
-                        )
-
-            i += 1
-            continue
-
-        i += 1
+    matches.sort(
+        key=lambda x: (
+            x["date"],
+            x["journee"],
+        )
+    )
 
     return matches
 
 
-# ============================================================
-# GENERATION ICS
-# ============================================================
+def escape_ics(value):
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\n", "\\n")
+    )
+
 
 def generate_ics(matches):
 
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
-        "PRODID:-//Aurore Vitré Basket//NM1//FR",
+        "PRODID:-//Aurore Vitré Basket Bretagne//NM1//FR",
         "CALSCALE:GREGORIAN",
         "METHOD:PUBLISH",
-        "X-WR-CALNAME:Aurore Vitré Basket - NM1",
-        "X-WR-TIMEZONE:Europe/Paris",
+        "X-WR-CALNAME:Aurore Vitré Basket Bretagne - NM1",
     ]
 
-    timestamp = datetime.now(
-        TZ
-    ).strftime("%Y%m%dT%H%M%S")
+    timestamp = datetime.utcnow().strftime(
+        "%Y%m%dT%H%M%SZ"
+    )
 
     for match in matches:
 
         start = match["date"]
 
-        end = start + timedelta(
-            hours=2
-        )
-
+        # Heure EXACTEMENT identique à celle de FFBB
         start_str = start.strftime(
             "%Y%m%dT%H%M%S"
         )
+
+        # Durée de 2 heures
+        end = start + timedelta(hours=2)
 
         end_str = end.strftime(
             "%Y%m%dT%H%M%S"
@@ -340,163 +289,107 @@ def generate_ics(matches):
         if match["domicile"]:
 
             summary = (
-                f"Aurore Vitré NM1 - {opponent}"
+                "Aurore Vitré Basket - "
+                + opponent
             )
 
-            location = (
-                "Salle de la Poultière, Vitré"
-            )
+            location = "Vitré"
 
         else:
 
             summary = (
-                f"{opponent} - Aurore Vitré NM1"
+                opponent
+                + " - Aurore Vitré Basket"
             )
 
             location = opponent
 
         uid = (
-            f"aurore-vitre-nm1-"
-            f"j{match['journee']}-"
-            f"{start_str}@github"
+            f"aurore-vitre-nm1-j"
+            f"{match['journee']}-"
+            f"{start.strftime('%Y%m%d')}@github"
         )
 
-        lines.extend([
-            "BEGIN:VEVENT",
-            f"UID:{uid}",
-            f"DTSTAMP:{timestamp}",
-            f"DTSTART;TZID=Europe/Paris:{start_str}",
-            f"DTEND;TZID=Europe/Paris:{end_str}",
-            f"SUMMARY:{escape_ics(summary)}",
-            f"LOCATION:{escape_ics(location)}",
-            (
-                f"DESCRIPTION:"
-                f"NM1 2026-2027 - "
-                f"Journée {match['journee']}"
-            ),
-            "END:VEVENT",
-        ])
+        lines.extend(
+            [
+                "BEGIN:VEVENT",
+                f"UID:{uid}",
+                f"DTSTAMP:{timestamp}",
+                f"DTSTART:{start_str}",
+                f"DTEND:{end_str}",
+                f"SUMMARY:{escape_ics(summary)}",
+                f"LOCATION:{escape_ics(location)}",
+                (
+                    "DESCRIPTION:"
+                    "Aurore Vitré Basket Bretagne - "
+                    f"NM1 - Journée {match['journee']}"
+                ),
+                "END:VEVENT",
+            ]
+        )
 
-    lines.append(
-        "END:VCALENDAR"
-    )
+    lines.append("END:VCALENDAR")
 
     return "\r\n".join(lines) + "\r\n"
 
 
-# ============================================================
-# PROGRAMME PRINCIPAL
-# ============================================================
-
 def main():
 
-    with sync_playwright() as p:
+    print("========================================")
+    print("Calendrier Aurore Vitré Basket NM1")
+    print("========================================")
 
-        browser = p.chromium.launch(
-            headless=True
-        )
+    text = get_page_text()
 
-        page = browser.new_page(
-            locale="fr-FR",
-            timezone_id="Europe/Paris"
-        )
-
-        print("Ouverture de la page FFBB...")
-
-        page.goto(
-            URL,
-            wait_until="networkidle",
-            timeout=60000
-        )
-
-        page.wait_for_timeout(
-            3000
-        )
-
-        matches = get_matches(
-            page
-        )
-
-        browser.close()
-
-    # --------------------------------------------------------
-    # SUPPRESSION DES DOUBLONS
-    # --------------------------------------------------------
-
-    unique = {}
-
-    for match in matches:
-
-        key = (
-            match["journee"],
-            match["date"],
-            match["domicile"],
-            match["opponent"],
-        )
-
-        unique[key] = match
-
-    matches = list(
-        unique.values()
-    )
-
-    matches.sort(
-        key=lambda x: x["date"]
-    )
-
-    # --------------------------------------------------------
-    # RESULTAT
-    # --------------------------------------------------------
+    matches = find_matches(text)
 
     print()
-    print("================================")
-    print(
-        f"TOTAL : {len(matches)} MATCHS"
-    )
-    print("================================")
-
-    for match in matches:
-
-        print(
-            f"J{match['journee']} | "
-            f"{match['date']} | "
-            f"{'DOMICILE' if match['domicile'] else 'EXTÉRIEUR'} | "
-            f"{match['opponent']}"
-        )
-
-    # --------------------------------------------------------
-    # SECURITE
-    # --------------------------------------------------------
+    print(f"Matchs trouvés : {len(matches)}")
+    print()
 
     if len(matches) < 20:
 
+        print("ERREUR : trop peu de matchs trouvés.")
+        print("Le calendrier FFBB a peut-être changé.")
+        print()
+
         raise RuntimeError(
-            f"Seulement {len(matches)} matchs récupérés. "
-            "Le fichier ICS ne sera pas publié."
+            f"Seulement {len(matches)} matchs trouvés."
         )
 
-    # --------------------------------------------------------
-    # GENERATION
-    # --------------------------------------------------------
+    print("Matchs détectés :")
+    print()
 
-    ics = generate_ics(
-        matches
-    )
+    for match in matches:
+
+        statut = (
+            "Domicile"
+            if match["domicile"]
+            else "Extérieur"
+        )
+
+        print(
+            f"J{match['journee']} | "
+            f"{match['date'].strftime('%d/%m/%Y')} | "
+            f"{match['date'].strftime('%Hh%M')} | "
+            f"{statut} | "
+            f"{match['opponent']}"
+        )
+
+    ics_content = generate_ics(matches)
 
     with open(
-        OUTPUT,
+        OUTPUT_FILE,
         "w",
-        encoding="utf-8"
+        encoding="utf-8",
+        newline="",
     ) as file:
-
-        file.write(
-            ics
-        )
+        file.write(ics_content)
 
     print()
-    print(
-        "✓ calendrier.ics généré avec succès."
-    )
+    print(f"Calendrier généré : {OUTPUT_FILE}")
+    print(f"Nombre d'événements : {len(matches)}")
+    print("========================================")
 
 
 if __name__ == "__main__":
