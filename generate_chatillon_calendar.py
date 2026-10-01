@@ -1,10 +1,14 @@
-from playwright.sync_api import sync_playwright
-from datetime import datetime
+import requests
+from datetime import datetime, timedelta
 import re
+import time
 
 
 URL = "https://competitions.ffbb.com/ligues/bre/comites/0035/clubs/bre0035135/equipes/200000005342013"
 OUTPUT_FILE = "calendrier-chatillon.ics"
+
+# Relais permettant de récupérer la page FFBB malgré le 403
+READER_URL = "https://r.jina.ai/" + URL
 
 
 MONTHS = {
@@ -32,54 +36,80 @@ MONTHS = {
 
 
 def get_page_text():
-    print("Téléchargement de la page FFBB...")
+    """
+    Récupère le contenu de la page FFBB via le lecteur Jina AI.
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+    Le site FFBB renvoie actuellement HTTP 403 aux runners GitHub.
+    Le relais permet de récupérer le contenu public de la page.
+    """
 
-        context = browser.new_context(
-            locale="fr-FR",
-            timezone_id="Europe/Paris",
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1920, "height": 1080},
-        )
+    print("Récupération du calendrier FFBB...")
+    print(f"URL : {URL}")
 
-        page = context.new_page()
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/plain,text/html,*/*",
+    }
 
-        response = page.goto(
-            URL,
-            wait_until="domcontentloaded",
-            timeout=60000,
-        )
+    for attempt in range(3):
 
-        if response:
-            print(f"HTTP : {response.status}")
+        try:
 
-        # Laisser FFBB charger complètement le calendrier
-        page.wait_for_timeout(5000)
+            response = requests.get(
+                READER_URL,
+                headers=headers,
+                timeout=60,
+            )
 
-        text = page.locator("body").inner_text()
+            print(
+                f"Réponse du relais : HTTP {response.status_code}"
+            )
 
-        print(f"Taille de la page : {len(text)} caractères")
+            if response.status_code == 200:
 
-        browser.close()
+                text = response.text
 
-        return text
+                print(
+                    f"Taille de la page : {len(text)} caractères"
+                )
+
+                if len(text) < 500:
+
+                    print(
+                        "Réponse trop courte, nouvelle tentative..."
+                    )
+
+                else:
+
+                    return text
+
+        except requests.RequestException as error:
+
+            print(
+                f"Erreur de connexion : {error}"
+            )
+
+        if attempt < 2:
+
+            time.sleep(5)
+
+    raise RuntimeError(
+        "Impossible de récupérer la page FFBB après 3 tentatives."
+    )
 
 
 def parse_date_and_time(line):
     """
-    Recherche une date et une heure directement dans une ligne.
+    Recherche une date et une heure dans une ligne.
 
-    Exemples acceptés :
+    Exemples :
         27 sept. 20h15
         4 oct. 10h30
-        8 nov. 01h00
-        4 avr. 02h00
     """
 
     match = re.search(
@@ -114,12 +144,6 @@ def parse_date_and_time(line):
 
 
 def find_matches(text):
-    """
-    Récupère les matchs à partir du calendrier affiché par FFBB.
-
-    L'heure récupérée est l'heure affichée par FFBB.
-    Aucune conversion de fuseau horaire n'est effectuée.
-    """
 
     lines = [
         line.strip()
@@ -131,7 +155,6 @@ def find_matches(text):
 
     for i, line in enumerate(lines):
 
-        # Recherche d'une journée : J1, J2, J3...
         journee_match = re.fullmatch(
             r"J(\d+)",
             line,
@@ -147,13 +170,14 @@ def find_matches(text):
         domicile = None
         opponent = None
 
-        # On analyse uniquement le bloc correspondant à cette journée.
-        # On s'arrête lorsqu'une nouvelle journée apparaît.
-        for j in range(i + 1, min(i + 20, len(lines))):
+        for j in range(
+            i + 1,
+            min(i + 25, len(lines)),
+        ):
 
             current = lines[j]
 
-            # Nouvelle journée : fin du bloc actuel
+            # Nouvelle journée
             if re.fullmatch(
                 r"J(\d+)",
                 current,
@@ -161,7 +185,7 @@ def find_matches(text):
             ):
                 break
 
-            # Recherche directe de la date + heure affichées
+            # Date + heure
             if date_value is None:
 
                 parsed = parse_date_and_time(current)
@@ -172,15 +196,16 @@ def find_matches(text):
 
             # Domicile / extérieur
             if current.lower() == "domicile":
+
                 domicile = True
                 continue
 
             if current.lower() == "extérieur":
+
                 domicile = False
                 continue
 
-            # Une fois les informations principales récupérées,
-            # la prochaine ligne pertinente est l'adversaire.
+            # Adversaire
             if (
                 date_value is not None
                 and domicile is not None
@@ -193,25 +218,41 @@ def find_matches(text):
                     "classement",
                     "domicile",
                     "extérieur",
+                    "date",
                 }
 
-                if current.lower() not in ignored:
+                if current.lower() in ignored:
+                    continue
 
-                    # On ignore les nombres seuls
-                    if not re.fullmatch(r"\d+", current):
+                if re.fullmatch(
+                    r"\d+",
+                    current,
+                ):
+                    continue
 
-                        # On ignore les heures seules éventuelles
-                        if not re.fullmatch(
-                            r"\d{1,2}h\d{2}",
-                            current,
-                            re.IGNORECASE,
-                        ):
+                if re.fullmatch(
+                    r"\d{1,2}h\d{2}",
+                    current,
+                    re.IGNORECASE,
+                ):
+                    continue
 
-                            opponent = current
+                # Certains éléments FFBB accolent un score
+                # à l'adversaire : "ROMAGNE BC00"
+                opponent = re.sub(
+                    r"\d+$",
+                    "",
+                    current,
+                ).strip()
 
-                            break
+                if opponent:
+                    break
 
-        if date_value and domicile is not None and opponent:
+        if (
+            date_value
+            and domicile is not None
+            and opponent
+        ):
 
             matches.append(
                 {
@@ -238,7 +279,6 @@ def find_matches(text):
 
     matches = list(unique.values())
 
-    # Tri chronologique
     matches.sort(
         key=lambda x: (
             x["date"],
@@ -250,9 +290,6 @@ def find_matches(text):
 
 
 def escape_ics(value):
-    """
-    Échappe les caractères spéciaux du format ICS.
-    """
 
     return (
         str(value)
@@ -264,17 +301,6 @@ def escape_ics(value):
 
 
 def generate_ics(matches):
-    """
-    Génère le fichier ICS.
-
-    IMPORTANT :
-    Les heures sont des heures locales flottantes.
-
-    Cela signifie que si FFBB indique 20h15,
-    l'ICS contient exactement 20h15.
-
-    Aucune conversion été/hiver n'est appliquée.
-    """
 
     lines = [
         "BEGIN:VCALENDAR",
@@ -285,8 +311,6 @@ def generate_ics(matches):
         "X-WR-CALNAME:Châtillon-en-Vendelais Basket 2 - DM4",
     ]
 
-    # DTSTAMP n'est pas l'heure du match.
-    # Il sert uniquement à indiquer quand l'événement a été généré.
     timestamp = datetime.utcnow().strftime(
         "%Y%m%dT%H%M%SZ"
     )
@@ -297,27 +321,11 @@ def generate_ics(matches):
 
         date_str = start.strftime("%Y%m%d")
 
-        # IMPORTANT :
-        # On utilise directement l'heure récupérée sur FFBB.
-        #
-        # Exemple :
-        # FFBB = 20h15
-        # ICS  = 20260927T201500
-        #
-        # Aucun TZID.
-        # Aucune conversion UTC.
+        # Heure locale flottante.
+        # Aucune conversion de fuseau horaire.
         start_str = start.strftime(
             "%Y%m%dT%H%M%S"
         )
-
-        # Durée de 2 heures, sans modifier l'heure de début.
-        end = start.replace(
-            hour=start.hour,
-            minute=start.minute,
-        )
-
-        # On ajoute 2 heures à la durée
-        from datetime import timedelta
 
         end = start + timedelta(hours=2)
 
@@ -390,9 +398,14 @@ def main():
 
     if len(matches) < 18:
 
-        print("ERREUR : trop peu de matchs trouvés.")
-        print("Le calendrier FFBB a peut-être changé.")
-        print()
+        print(
+            "ERREUR : moins de 18 matchs trouvés."
+        )
+
+        print(
+            "Le calendrier FFBB a peut-être changé "
+            "ou le relais n'a pas récupéré la page."
+        )
 
         raise RuntimeError(
             f"Seulement {len(matches)} matchs trouvés."
@@ -425,11 +438,18 @@ def main():
         encoding="utf-8",
         newline="",
     ) as file:
+
         file.write(ics_content)
 
     print()
-    print(f"Calendrier généré : {OUTPUT_FILE}")
-    print(f"Nombre d'événements : {len(matches)}")
+    print(
+        f"Calendrier généré : {OUTPUT_FILE}"
+    )
+
+    print(
+        f"Nombre d'événements : {len(matches)}"
+    )
+
     print("========================================")
 
 
