@@ -19,12 +19,12 @@ jobs:
       - name: Installer Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.12"
 
-      - name: Installer les dépendances
+      - name: Installer le client FFBB
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install ffbb-api-client-v2==1.4.0
 
       - name: Générer le calendrier
         run: |
