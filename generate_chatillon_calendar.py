@@ -162,35 +162,62 @@ def find_engagement(client):
 
 def get_poule(client, engagement):
 
+    engagement_id = object_id(engagement)
+
+    if not engagement_id:
+        raise RuntimeError(
+            "Impossible de récupérer l'identifiant de l'engagement."
+        )
+
+    print()
+    print(
+        f"Récupération de l'engagement complet {engagement_id}..."
+    )
+
+    # Récupération complète de l'engagement
+    full_engagement = client.get_engagement(
+        int(engagement_id)
+    )
+
+    if full_engagement is None:
+        raise RuntimeError(
+            f"Impossible de récupérer l'engagement {engagement_id}."
+        )
+
     id_poule = value(
-        engagement,
+        full_engagement,
         "idPoule",
     )
 
     poule_id = object_id(id_poule)
 
     print(
-        f"idPoule : {poule_id}"
+        f"idPoule récupéré : {poule_id}"
     )
 
     if not poule_id:
-
         raise RuntimeError(
-            "Impossible de récupérer idPoule."
+            "L'engagement complet ne contient pas d'idPoule."
         )
+
+    print(
+        f"Récupération de la poule {poule_id}..."
+    )
 
     poule = client.get_poule(
         int(poule_id)
     )
 
     if poule is None:
-
         raise RuntimeError(
             f"Impossible de récupérer la poule {poule_id}."
         )
 
-    return poule
+    print(
+        f"Poule récupérée : {value(poule, 'nom', 'Poule inconnue')}"
+    )
 
+    return poule
 
 # ============================================================
 # MATCHS
