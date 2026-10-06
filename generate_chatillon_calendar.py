@@ -1,7 +1,4 @@
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
-import uuid
-
+from datetime import datetime, timedelta
 from ffbb_api_client_v2 import FFBBAPIClientV2, TokenManager
 
 
@@ -9,17 +6,12 @@ from ffbb_api_client_v2 import FFBBAPIClientV2, TokenManager
 # CONFIGURATION
 # ============================================================
 
-TEAM_ID = 200000005342013
-
-OUTPUT_FILE = "calendrier-chatillon.ics"
+TEAM_ID = "200000005342013"
 
 TEAM_NAME = "Châtillon-en-Vendelais Basket 2"
 
-TIMEZONE = ZoneInfo("Europe/Paris")
+OUTPUT_FILE = "calendrier-chatillon.ics"
 
-# Sécurité :
-# On refuse de générer un calendrier si FFBB ne renvoie
-# pas au minimum 18 matchs.
 MIN_MATCHES = 18
 
 
@@ -27,184 +19,79 @@ MIN_MATCHES = 18
 # OUTILS
 # ============================================================
 
-def get_object_value(obj, *names, default=None):
-    """
-    Récupère proprement un attribut sur un objet FFBB.
-
-    La v1.4.0 utilise des modèles typés.
-    On privilégie donc getattr() plutôt qu'une conversion
-    récursive en dictionnaire.
-    """
-
-    if obj is None:
-        return default
-
-    for name in names:
-
-        if hasattr(obj, name):
-
-            value = getattr(obj, name)
-
-            if value is not None:
-                return value
-
-    return default
+def value(obj, name, default=None):
+    """Récupère un attribut sur un objet FFBB."""
+    return getattr(obj, name, default)
 
 
-def get_nested_id(obj):
-    """
-    Récupère l'identifiant d'un objet FFBB ou d'un identifiant
-    qui peut être retourné directement sous forme de chaîne.
-    """
+def object_id(obj):
+    """Récupère l'ID d'un objet FFBB ou une valeur déjà sous forme d'ID."""
 
     if obj is None:
         return None
 
-    # Identifiant directement fourni
-    if isinstance(obj, (int, str)):
-        return obj
+    if isinstance(obj, (str, int)):
+        return str(obj)
 
-    # Objet FFBB avec attribut id
-    value = getattr(
-        obj,
-        "id",
-        None,
-    )
+    identifiant = getattr(obj, "id", None)
 
-    if value is not None:
-        return value
-
-    # Certains objets peuvent avoir idEngagement / idPoule
-    for name in (
-        "idEngagement",
-        "idPoule",
-        "idEquipe",
-    ):
-
-        value = getattr(
-            obj,
-            name,
-            None,
-        )
-
-        if value is not None:
-
-            if isinstance(
-                value,
-                (int, str),
-            ):
-                return value
-
-            nested_id = getattr(
-                value,
-                "id",
-                None,
-            )
-
-            if nested_id is not None:
-                return nested_id
+    if identifiant is not None:
+        return str(identifiant)
 
     return None
 
 
-def parse_datetime(value):
-    """
-    Transforme une date FFBB en datetime local.
-
-    Si FFBB fournit une date avec fuseau :
-    conversion vers Europe/Paris.
-
-    Si FFBB fournit une date sans fuseau :
-    l'heure est conservée telle quelle.
-
-    Cela permet notamment de conserver :
-        20h15 -> 20h15
-        10h30 -> 10h30
-    """
-
-    if value is None:
-        return None
+def parse_date(value):
+    """Convertit la date FFBB en datetime sans modifier l'heure affichée."""
 
     if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
 
-        dt = value
+    text = str(value).strip()
 
-    else:
+    if text.endswith("Z"):
+        text = text[:-1]
 
-        text = str(value).strip()
+    # ISO classique FFBB
+    try:
+        return datetime.fromisoformat(text).replace(tzinfo=None)
+    except ValueError:
+        pass
 
-        if not text:
-            return None
-
-        # FFBB peut fournir une date ISO terminée par Z
-        if text.endswith("Z"):
-
-            text = (
-                text[:-1]
-                + "+00:00"
-            )
-
+    # Formats de secours
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+    ):
         try:
-
-            dt = datetime.fromisoformat(
-                text
-            )
-
+            return datetime.strptime(text, fmt)
         except ValueError:
+            continue
 
-            formats = [
-                "%Y-%m-%d %H:%M:%S",
-                "%Y-%m-%d %H:%M",
-                "%d/%m/%Y %H:%M:%S",
-                "%d/%m/%Y %H:%M",
-            ]
+    raise RuntimeError(
+        f"Impossible de lire la date FFBB : {value}"
+    )
 
-            dt = None
 
-            for fmt in formats:
-
-                try:
-
-                    dt = datetime.strptime(
-                        text,
-                        fmt,
-                    )
-
-                    break
-
-                except ValueError:
-                    continue
-
-            if dt is None:
-
-                raise RuntimeError(
-                    f"Date FFBB impossible à lire : {value}"
-                )
-
-    # Si un fuseau est fourni par FFBB,
-    # on convertit vers Paris.
-    if dt.tzinfo is not None:
-
-        return dt.astimezone(
-            TIMEZONE
-        ).replace(
-            tzinfo=None
-        )
-
-    # Si aucune information de fuseau n'est fournie,
-    # on conserve exactement l'heure FFBB.
-    return dt
+def escape_ics(value):
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\n", "\\n")
+    )
 
 
 # ============================================================
-# CLIENT FFBB
+# API FFBB
 # ============================================================
 
 def create_client():
 
-    print(
-        "Connexion à l'API FFBB..."
-    )
+    print("Connexion à l'API FFBB...")
 
     tokens = TokenManager.get_tokens()
 
@@ -213,80 +100,83 @@ def create_client():
         meilisearch_bearer_token=tokens.meilisearch_token,
     )
 
-    print(
-        "Connexion API FFBB OK."
-    )
+    print("Connexion API FFBB OK.")
 
     return client
 
 
-# ============================================================
-# ENGAGEMENT
-# ============================================================
-
-def get_engagement(client):
+def find_engagement(client):
 
     print()
-    print(
-        f"Récupération de l'équipe FFBB : {TEAM_ID}"
-    )
+    print(f"Recherche de l'engagement {TEAM_ID}...")
 
-    engagement = client.get_engagement(
+    # La v1.4.0 possède une recherche d'engagements.
+    result = client.search_engagements(
         TEAM_ID
     )
 
-    if engagement is None:
+    hits = getattr(result, "hits", [])
 
-        raise RuntimeError(
-            f"Impossible de récupérer "
-            f"l'engagement FFBB {TEAM_ID}."
-        )
+    for engagement in hits:
 
-    print(
-        "Engagement FFBB récupéré."
+        identifiant = object_id(engagement)
+
+        if identifiant == TEAM_ID:
+            print("Engagement trouvé.")
+            return engagement
+
+    # Recherche supplémentaire par nom si l'ID n'est
+    # pas directement présent dans les résultats.
+    result = client.search_engagements(
+        "Châtillon-en-Vendelais"
     )
 
-    return engagement
+    hits = getattr(result, "hits", [])
 
+    for engagement in hits:
 
-# ============================================================
-# POULE
-# ============================================================
+        identifiant = object_id(engagement)
+
+        nom = str(
+            value(
+                engagement,
+                "nom",
+                "",
+            )
+        )
+
+        if (
+            identifiant == TEAM_ID
+            or "châtillon" in nom.lower()
+            or "chatillon" in nom.lower()
+        ):
+            print(
+                f"Engagement trouvé : {nom}"
+            )
+            return engagement
+
+    raise RuntimeError(
+        f"Impossible de trouver l'engagement FFBB {TEAM_ID}."
+    )
+
 
 def get_poule(client, engagement):
 
-    # --------------------------------------------------------
-    # idPoule
-    # --------------------------------------------------------
-
-    id_poule = get_object_value(
+    id_poule = value(
         engagement,
         "idPoule",
-        "id_poule",
     )
 
-    poule_id = get_nested_id(
-        id_poule
-    )
-
-    print()
-    print(
-        "Recherche de la poule FFBB..."
-    )
+    poule_id = object_id(id_poule)
 
     print(
-        f"idPoule brut : {id_poule}"
+        f"idPoule : {poule_id}"
     )
 
-    print(
-        f"idPoule utilisé : {poule_id}"
-    )
-
-    if poule_id is None:
+    if not poule_id:
 
         raise RuntimeError(
-            "Impossible de récupérer idPoule "
-            "depuis l'engagement FFBB."
+            "Impossible de récupérer idPoule."
         )
 
     poule = client.get_poule(
@@ -296,213 +186,101 @@ def get_poule(client, engagement):
     if poule is None:
 
         raise RuntimeError(
-            f"Impossible de récupérer "
-            f"la poule FFBB {poule_id}."
+            f"Impossible de récupérer la poule {poule_id}."
         )
-
-    print(
-        "Poule FFBB récupérée."
-    )
 
     return poule
 
 
 # ============================================================
-# RENCONTRES
+# MATCHS
 # ============================================================
 
-def get_rencontres(poule):
+def get_matches(poule):
 
-    rencontres = get_object_value(
+    rencontres = value(
         poule,
         "rencontres",
-        default=None,
+        [],
     )
-
-    if rencontres is None:
-
-        raise RuntimeError(
-            "La poule FFBB ne contient pas "
-            "de liste de rencontres."
-        )
 
     print(
-        f"Rencontres récupérées dans la poule : "
-        f"{len(rencontres)}"
+        f"Rencontres dans la poule : {len(rencontres)}"
     )
-
-    return rencontres
-
-
-# ============================================================
-# MATCHS DE CHÂTILLON
-# ============================================================
-
-def extract_matches(rencontres):
 
     matches = []
 
-    print()
-    print(
-        "Analyse des rencontres..."
-    )
-
     for rencontre in rencontres:
 
-        # ----------------------------------------------------
-        # Équipes
-        # ----------------------------------------------------
-
-        equipe1 = get_object_value(
-            rencontre,
-            "nomEquipe1",
-            default="",
-        )
-
-        equipe2 = get_object_value(
-            rencontre,
-            "nomEquipe2",
-            default="",
-        )
-
         equipe1 = str(
-            equipe1 or ""
+            value(
+                rencontre,
+                "nomEquipe1",
+                "",
+            )
         ).strip()
 
         equipe2 = str(
-            equipe2 or ""
+            value(
+                rencontre,
+                "nomEquipe2",
+                "",
+            )
         ).strip()
 
-        if not equipe1 or not equipe2:
-            continue
-
-        # ----------------------------------------------------
-        # Engagements des équipes
-        # ----------------------------------------------------
-
-        engagement1 = get_object_value(
-            rencontre,
-            "idEngagementEquipe1",
-            default=None,
-        )
-
-        engagement2 = get_object_value(
-            rencontre,
-            "idEngagementEquipe2",
-            default=None,
-        )
-
-        engagement1_id = get_nested_id(
-            engagement1
-        )
-
-        engagement2_id = get_nested_id(
-            engagement2
-        )
-
-        is_team1 = (
-            str(engagement1_id)
-            == str(TEAM_ID)
-        )
-
-        is_team2 = (
-            str(engagement2_id)
-            == str(TEAM_ID)
-        )
-
-        # ----------------------------------------------------
-        # Sécurité supplémentaire avec le nom
-        # ----------------------------------------------------
-
-        if not is_team1 and not is_team2:
-
-            nom1 = equipe1.lower()
-            nom2 = equipe2.lower()
-
-            if (
-                "châtillon" in nom1
-                or "chatillon" in nom1
-            ):
-
-                is_team1 = True
-
-            elif (
-                "châtillon" in nom2
-                or "chatillon" in nom2
-            ):
-
-                is_team2 = True
-
-        if not is_team1 and not is_team2:
-            continue
-
-        # ----------------------------------------------------
-        # Journée
-        # ----------------------------------------------------
-
-        journee = get_object_value(
-            rencontre,
-            "numeroJournee",
-            "numero_journee",
-            default=0,
-        )
-
-        try:
-
-            journee = int(
-                journee
+        engagement1 = object_id(
+            value(
+                rencontre,
+                "idEngagementEquipe1",
             )
+        )
 
-        except (
-            TypeError,
-            ValueError,
-        ):
+        engagement2 = object_id(
+            value(
+                rencontre,
+                "idEngagementEquipe2",
+            )
+        )
 
-            journee = 0
+        # Identification principale par ID
+        team_is_1 = engagement1 == TEAM_ID
+        team_is_2 = engagement2 == TEAM_ID
 
-        # ----------------------------------------------------
-        # Date du match
-        # ----------------------------------------------------
+        # Sécurité supplémentaire par le nom
+        if not team_is_1 and not team_is_2:
 
-        date_raw = get_object_value(
+            if "châtillon" in equipe1.lower() or \
+               "chatillon" in equipe1.lower():
+
+                team_is_1 = True
+
+            elif "châtillon" in equipe2.lower() or \
+                 "chatillon" in equipe2.lower():
+
+                team_is_2 = True
+
+        if not team_is_1 and not team_is_2:
+            continue
+
+        date_raw = value(
             rencontre,
             "date_rencontre",
-            "dateRencontre",
-            default=None,
         )
 
         if date_raw is None:
-
-            print(
-                f"J{journee} ignorée : "
-                "date absente."
-            )
-
             continue
 
-        try:
+        date_match = parse_date(
+            date_raw
+        )
 
-            date_match = parse_datetime(
-                date_raw
-            )
+        journee = value(
+            rencontre,
+            "numeroJournee",
+            0,
+        )
 
-        except Exception as error:
-
-            print(
-                f"J{journee} ignorée : "
-                f"date invalide : {error}"
-            )
-
-            continue
-
-        if date_match is None:
-            continue
-
-        # ----------------------------------------------------
-        # Adversaire / domicile
-        # ----------------------------------------------------
-
-        if is_team1:
+        if team_is_1:
 
             opponent = equipe2
             domicile = True
@@ -512,75 +290,23 @@ def extract_matches(rencontres):
             opponent = equipe1
             domicile = False
 
-        # ----------------------------------------------------
-        # Lieu
-        # ----------------------------------------------------
-
-        location = get_object_value(
-            rencontre,
-            "lieu",
-            "nomSalle",
-            "salle",
-            default=None,
-        )
-
-        if location is None:
-
-            location = (
-                "Châtillon-en-Vendelais"
-                if domicile
-                else opponent
-            )
-
-        else:
-
-            # Si salle est un objet FFBB
-            salle_nom = get_object_value(
-                location,
-                "nom",
-                "libelle",
-                default=None,
-            )
-
-            if salle_nom:
-
-                location = salle_nom
-
-            else:
-
-                location = str(
-                    location
-                )
-
-        # ----------------------------------------------------
-        # Match
-        # ----------------------------------------------------
-
-        match = {
-            "journee": journee,
-            "date": date_match,
-            "domicile": domicile,
-            "opponent": opponent,
-            "location": location,
-        }
-
         matches.append(
-            match
+            {
+                "journee": int(journee),
+                "date": date_match,
+                "opponent": opponent,
+                "domicile": domicile,
+            }
         )
 
-    # --------------------------------------------------------
     # Suppression des doublons
-    # --------------------------------------------------------
-
     unique = {}
 
     for match in matches:
 
         key = (
             match["journee"],
-            match["date"].strftime(
-                "%Y-%m-%d %H:%M"
-            ),
+            match["date"],
             match["opponent"],
         )
 
@@ -590,15 +316,8 @@ def extract_matches(rencontres):
         unique.values()
     )
 
-    # --------------------------------------------------------
-    # Tri
-    # --------------------------------------------------------
-
     matches.sort(
-        key=lambda match: (
-            match["date"],
-            match["journee"],
-        )
+        key=lambda x: x["date"]
     )
 
     return matches
@@ -608,30 +327,11 @@ def extract_matches(rencontres):
 # ICS
 # ============================================================
 
-def escape_ics(value):
-
-    return (
-        str(value)
-        .replace(
-            "\\",
-            "\\\\",
-        )
-        .replace(
-            ";",
-            "\\;",
-        )
-        .replace(
-            ",",
-            "\\,",
-        )
-        .replace(
-            "\n",
-            "\\n",
-        )
-    )
-
-
 def generate_ics(matches):
+
+    timestamp = datetime.utcnow().strftime(
+        "%Y%m%dT%H%M%SZ"
+    )
 
     lines = [
         "BEGIN:VCALENDAR",
@@ -640,21 +340,12 @@ def generate_ics(matches):
         "CALSCALE:GREGORIAN",
         "METHOD:PUBLISH",
         "X-WR-CALNAME:Châtillon-en-Vendelais Basket 2 - DM4",
-        "X-WR-TIMEZONE:Europe/Paris",
     ]
-
-    # DTSTAMP = moment de génération du calendrier.
-    timestamp = datetime.now(
-        timezone.utc
-    ).strftime(
-        "%Y%m%dT%H%M%SZ"
-    )
 
     for match in matches:
 
         start = match["date"]
 
-        # Durée de 2 heures
         end = start + timedelta(
             hours=2
         )
@@ -667,46 +358,29 @@ def generate_ics(matches):
             "%Y%m%dT%H%M%S"
         )
 
-        date_str = start.strftime(
-            "%Y%m%d"
-        )
-
-        opponent = match["opponent"]
-
         if match["domicile"]:
 
             summary = (
-                f"{TEAM_NAME} - {opponent}"
+                f"{TEAM_NAME} - "
+                f"{match['opponent']}"
             )
+
+            location = "Châtillon-en-Vendelais"
 
         else:
 
             summary = (
-                f"{opponent} - {TEAM_NAME}"
+                f"{match['opponent']} - "
+                f"{TEAM_NAME}"
             )
 
-        description = (
-            f"{TEAM_NAME} - "
-            f"DM4 - Journée {match['journee']}"
-        )
-
-        # UID stable pour éviter la création
-        # de doublons dans les calendriers abonnés.
-        uid_source = (
-            f"chatillon-dm4|"
-            f"J{match['journee']}|"
-            f"{date_str}|"
-            f"{opponent}"
-        )
+            location = match["opponent"]
 
         uid = (
-            str(
-                uuid.uuid5(
-                    uuid.NAMESPACE_URL,
-                    uid_source,
-                )
-            )
-            + "@chatillon-dm4"
+            f"chatillon-dm4-"
+            f"j{match['journee']}-"
+            f"{start.strftime('%Y%m%d')}-"
+            f"{start.strftime('%H%M')}@github"
         )
 
         lines.extend(
@@ -715,17 +389,19 @@ def generate_ics(matches):
                 f"UID:{uid}",
                 f"DTSTAMP:{timestamp}",
 
-                # IMPORTANT :
-                # Heure locale flottante.
-                # Pas de Z.
+                # Heure locale FFBB.
                 # Pas de conversion UTC.
-                # Pas de TZID.
                 f"DTSTART:{start_str}",
                 f"DTEND:{end_str}",
 
                 f"SUMMARY:{escape_ics(summary)}",
-                f"LOCATION:{escape_ics(match['location'])}",
-                f"DESCRIPTION:{escape_ics(description)}",
+                f"LOCATION:{escape_ics(location)}",
+
+                (
+                    "DESCRIPTION:"
+                    f"{escape_ics(TEAM_NAME)} - "
+                    f"DM4 - Journée {match['journee']}"
+                ),
 
                 "END:VEVENT",
             ]
@@ -735,10 +411,7 @@ def generate_ics(matches):
         "END:VCALENDAR"
     )
 
-    return (
-        "\r\n".join(lines)
-        + "\r\n"
-    )
+    return "\r\n".join(lines) + "\r\n"
 
 
 # ============================================================
@@ -747,99 +420,38 @@ def generate_ics(matches):
 
 def main():
 
-    print(
-        "========================================"
-    )
-
-    print(
-        "Calendrier Châtillon-en-Vendelais DM4"
-    )
-
-    print(
-        "API FFBB - ffbb-api-client-v2 1.4.0"
-    )
-
-    print(
-        "========================================"
-    )
-
-    # --------------------------------------------------------
-    # Connexion
-    # --------------------------------------------------------
+    print("========================================")
+    print("Calendrier Châtillon-en-Vendelais DM4")
+    print("========================================")
 
     client = create_client()
 
-    # --------------------------------------------------------
-    # Engagement
-    # --------------------------------------------------------
-
-    engagement = get_engagement(
+    engagement = find_engagement(
         client
     )
 
-    # --------------------------------------------------------
-    # Poule
-    # --------------------------------------------------------
-
     poule = get_poule(
         client,
-        engagement,
+        engagement
     )
 
-    # --------------------------------------------------------
-    # Rencontres
-    # --------------------------------------------------------
-
-    rencontres = get_rencontres(
+    matches = get_matches(
         poule
-    )
-
-    # --------------------------------------------------------
-    # Matchs Châtillon
-    # --------------------------------------------------------
-
-    matches = extract_matches(
-        rencontres
     )
 
     print()
     print(
-        f"Matchs Châtillon trouvés : "
-        f"{len(matches)}"
+        f"Matchs Châtillon trouvés : {len(matches)}"
     )
 
-    # --------------------------------------------------------
-    # Sécurité
-    # --------------------------------------------------------
-
     if len(matches) < MIN_MATCHES:
-
-        print()
-        print(
-            "ERREUR : trop peu de matchs trouvés."
-        )
-
-        print(
-            f"Minimum attendu : {MIN_MATCHES}"
-        )
-
-        print(
-            "Le calendrier ICS ne sera PAS généré."
-        )
 
         raise RuntimeError(
             f"Seulement {len(matches)} matchs trouvés."
         )
 
-    # --------------------------------------------------------
-    # Affichage des matchs
-    # --------------------------------------------------------
-
     print()
-    print(
-        "Matchs détectés :"
-    )
-
+    print("Matchs détectés :")
     print()
 
     for match in matches:
@@ -858,11 +470,7 @@ def main():
             f"{match['opponent']}"
         )
 
-    # --------------------------------------------------------
-    # Génération ICS
-    # --------------------------------------------------------
-
-    ics_content = generate_ics(
+    ics = generate_ics(
         matches
     )
 
@@ -873,9 +481,7 @@ def main():
         newline="",
     ) as file:
 
-        file.write(
-            ics_content
-        )
+        file.write(ics)
 
     print()
     print(
@@ -886,11 +492,8 @@ def main():
         f"Nombre d'événements : {len(matches)}"
     )
 
-    print(
-        "========================================"
-    )
+    print("========================================")
 
 
 if __name__ == "__main__":
-
     main()
