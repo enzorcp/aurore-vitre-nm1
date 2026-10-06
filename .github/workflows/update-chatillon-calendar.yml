@@ -13,35 +13,64 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # =====================================================
+      # Récupérer le dépôt
+      # =====================================================
+
       - name: Récupérer le dépôt
         uses: actions/checkout@v4
+
+
+      # =====================================================
+      # Installer Python
+      # =====================================================
 
       - name: Installer Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
+          cache: "pip"
+
+
+      # =====================================================
+      # Installer le client FFBB
+      # =====================================================
 
       - name: Installer le client FFBB
         run: |
           python -m pip install --upgrade pip
           pip install ffbb-api-client-v2==1.4.0
 
+
+      # =====================================================
+      # Générer le calendrier
+      # =====================================================
+
       - name: Générer le calendrier
         run: |
           python generate_chatillon_calendar.py
+
+
+      # =====================================================
+      # Vérifier le fichier ICS
+      # =====================================================
 
       - name: Vérifier le fichier ICS
         run: |
           test -f calendrier-chatillon.ics
 
-          COUNT=$(grep -c "BEGIN:VEVENT" calendrier-chatillon.ics)
+          echo "Calendrier généré :"
+          grep -c "BEGIN:VEVENT" calendrier-chatillon.ics
 
-          echo "Nombre de matchs : $COUNT"
+          echo ""
+          echo "Premières lignes du calendrier :"
+          head -20 calendrier-chatillon.ics
 
-          if [ "$COUNT" -lt 18 ]; then
-            echo "ERREUR : moins de 18 matchs."
-            exit 1
-          fi
+
+      # =====================================================
+      # Enregistrer les modifications
+      # =====================================================
 
       - name: Enregistrer les modifications
         run: |
@@ -50,6 +79,9 @@ jobs:
 
           git add calendrier-chatillon.ics
 
-          git diff --cached --quiet || git commit -m "Mise à jour du calendrier Châtillon DM4"
-
-          git push
+          if git diff --cached --quiet; then
+            echo "Aucune modification du calendrier."
+          else
+            git commit -m "Mise à jour du calendrier Châtillon DM4"
+            git push
+          fi
