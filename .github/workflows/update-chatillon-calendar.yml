@@ -34,14 +34,12 @@ jobs:
         run: |
           test -f calendrier-chatillon.ics
 
-          echo "Calendrier généré :"
-
           COUNT=$(grep -c "BEGIN:VEVENT" calendrier-chatillon.ics)
 
           echo "Nombre de matchs : $COUNT"
 
           if [ "$COUNT" -lt 18 ]; then
-            echo "ERREUR : moins de 18 matchs dans le calendrier."
+            echo "ERREUR : moins de 18 matchs."
             exit 1
           fi
 
@@ -52,7 +50,6 @@ jobs:
 
           git add calendrier-chatillon.ics
 
-          git diff --cached --quiet || \
-            git commit -m "Mise à jour du calendrier Châtillon DM4"
+          git diff --cached --quiet || git commit -m "Mise à jour du calendrier Châtillon DM4"
 
           git push
